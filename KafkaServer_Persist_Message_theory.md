@@ -158,6 +158,20 @@ buffer cache和page cache两者最大的区别是缓存的粒度。buffer cache�
 
 *Cache与Buffer的映射关系*
 
+### Page Cache
+页缓存是面向文件，面向内存的。通俗来说，它位于内存和文件之间缓冲区，文件IO操作实际上只和page cache交互，不直接和内存交互。page cache可以用在所有以文件为单元的场景下，比如网络文件系统等等。page cache通过一系列的数据结构，比如inode, address_space, struct page，实现将一个文件映射到页的级别：
+
+1. struct page结构标志一个物理内存页，通过page + offset就可以将此页帧定位到一个文件中的具体位置。同时struct page还有以下重要参数：
+  - 标志位flags来记录该页是否是脏页，是否正在被写回等等；
+  - mapping指向了地址空间address_space，表示这个页是一个页缓存中页，和一个文件的地址空间对应；
+  - index记录这个页在文件中的页偏移量；
+
+2. 文件系统的inode实际维护了这个文件所有的块block的块号，通过对文件偏移量offset取模可以很快定位到这个偏移量所在的文件系统的块号，磁盘的扇区号。同样，通过对文件偏移量offset进行取模可以计算出偏移量所在的页的偏移量。
+
+3. page cache缓存组件抽象了地址空间address_space这个概念来作为文件系统和页缓存的中间桥梁。地址空间address_space通过指针可以方便的获取文件inode和struct page的信息，所以可以很方便地定位到一个文件的offset在各个组件中的位置，即通过：文件字节偏移量 --> 页偏移量 --> 文件系统块号 block  -->  磁盘扇区号
+
+4. 页缓存实际上就是采用了一个基数树结构将一个文件的内容组织起来存放在物理内存struct page中。一个文件inode对应一个地址空间address_space。而一个address_space对应一个页缓存基数树。
+
 ### JDK中的MMAP
 
 这里研究的是FileChannelImpl这个实现类:
