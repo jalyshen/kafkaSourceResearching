@@ -142,6 +142,7 @@ Linux使用了CPU的2个特权级别，分别执行“用户态”和“内核�
 
 #### Buffer和Cache
 buffer和cache是两个不同的概念：cache是高速缓存，用于CPU和内存之间的缓冲；buffer是I/O缓存，用于内存和硬盘的缓冲；简单的说，cache是加速“读”，而buffer是缓冲“写”，前者解决读的问题，保存从磁盘上读出的数据，后者是解决写的问题，保存即将要写入到磁盘上的数据。
+
 ![](img/Process-address-space.png)
 *Cache示意图*
 
@@ -151,6 +152,7 @@ buffer cache和page cache都是为了处理设备和内存交互时高速访问�
 Linux2.6之后内核将这两个缓存整合，页和块可以相互映射，同时，页缓存page cache面向的是虚拟内存，块I/O缓存Buffer cache是面向块设备。<b>需要强调的是，页缓存和块缓存对进程来说就是一个存储系统，进程不需要关注底层的设备的读写</b>。
 
 buffer cache和page cache两者最大的区别是缓存的粒度。buffer cache面向的是文件系统的块。而内核的内存管理组件采用了比文件系统的块更高级别的抽象：页page，其处理的性能更高。因此和内存管理交互的缓存组件，都使用页缓存。
+
 ![](cache-space-map-buffer-space.png)
 *Cache与Buffer的映射关系*
 
