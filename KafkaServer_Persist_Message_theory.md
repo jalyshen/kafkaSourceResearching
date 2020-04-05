@@ -39,6 +39,7 @@ A Records implementation backed by a file. An optional start and end position ca
     /**
      * Append a set of records to the file. This method is not thread-safe and must be
      * protected with a lock.
+     * 这个方法，就是把记录（Message）写到文件里
      *
      * @param records The records to append
      * @return the number of bytes written to the underlying file
@@ -64,6 +65,36 @@ A Records implementation backed by a file. An optional start and end position ca
      */
     public void flush() throws IOException {
         channel.force(true);
+    }
+
+    /**
+     * Attempts to write the contents of this buffer to a channel.
+     * 接口中的描述：试图把缓存中的内容写到一个通道中。
+     *
+     * 这个方法，用于把数据发送其他节点、消费者
+     */
+    @Override
+    public long writeTo(GatheringByteChannel destChannel, long offset, int length) throws IOException {
+        long newSize = Math.min(channel.size(), end) - start;
+        int oldSize = sizeInBytes();
+        if (newSize < oldSize)
+            throw new KafkaException(String.format(
+                    "Size of FileRecords %s has been truncated during write: old size %d, new size %d",
+                    file.getAbsolutePath(), oldSize, newSize));
+
+        long position = start + offset;
+        int count = Math.min(length, oldSize);
+        final long bytesTransferred;
+        if (destChannel instanceof TransportLayer) {
+            TransportLayer tl = (TransportLayer) destChannel;
+            bytesTransferred = tl.transferFrom(channel, position, count);
+        } else {
+            //============================================================
+            // 调用NIO，零拷贝方式：磁盘 -> 内核空间  - >目的缓冲区
+            //============================================================
+            bytesTransferred = channel.transferTo(position, count, destChannel);
+        }
+        return bytesTransferred;
     }
   }
 ```
@@ -198,7 +229,11 @@ Address_Space是Linux内核中的一个关键抽象，它被作为文件系统�
   
 同时注意，脏页不能被置换出内存，如果脏页正在被写回，那么会被设置写回标记，这时候该页就被上锁，其他写请求被阻塞直到锁释放。
 
-### JDK中的MMAP
+### JDK中的Channel
+
+MemoryRecords使用的channle是接口<b>GatheringByteChannel</b>。官方的说明是：
+
+    A channel that can write bytes from a sequence of buffers.
 
 这里研究的是FileChannelImpl这个实现类:
 ```java
@@ -208,9 +243,14 @@ Address_Space是Linux内核中的一个关键抽象，它被作为文件系统�
             throw new NonWritableChannelException();
         synchronized (positionLock) {
             if (direct)
-                //===================================
-                //
-                //===================================
+                //========================================================
+                // alignment: IO alignment value for DirectIO
+                // 对于Linux 2.4.10 + ，BlockSize大小： 4096
+                // 需要与Page Cache页面对齐：
+                // 用于传递数据的缓冲区，其内存边界必须对齐为 BlockSize 的整数倍
+                // 用于传递数据的缓冲区，其传递数据的大小必须是 BlockSize 的整数倍。
+                // 数据传输的开始点，即文件和设备的偏移量，必须是 BlockSize 的整数倍
+                //=========================================================
                 Util.checkChannelPositionAligned(position(), alignment);
             int n = 0;
             int ti = -1;
@@ -220,9 +260,12 @@ Address_Space是Linux内核中的一个关键抽象，它被作为文件系统�
                 if (!isOpen())
                     return 0;
                 do {
-                    //===================================
-                    //
-                    //===================================
+                    //==========================================================
+                    // 数据写入
+                    // fd: FileDescriptor 是文件描述符，用来表示开放文件、开放套接字等
+                    //     相当于文件句柄
+                    // nd: FileDispatcher 用于不同的平台调用native()方法来完成read和write操作。
+                    //==========================================================
                     n = IOUtil.write(fd, src, -1, direct, alignment, nd);
                 } while ((n == IOStatus.INTERRUPTED) && isOpen());
                 return IOStatus.normalize(n);
@@ -233,4 +276,126 @@ Address_Space是Linux内核中的一个关键抽象，它被作为文件系统�
             }
         }
     }
+```
+
+IOUtil.java 中的 write():
+```java
+    static int write(FileDescriptor fd, ByteBuffer src, long position,
+                     boolean directIO, int alignment, NativeDispatcher nd)
+        throws IOException
+    {
+        //==========================================
+        // 是否使用的是DirectBuffer
+        // 如果是，则直接写
+        // 否则，Kafka帮忙对齐Page Cache，然后再写
+        //==========================================
+        if (src instanceof DirectBuffer) {
+            return writeFromNativeBuffer(fd, src, position, directIO, alignment, nd);
+        }
+
+        // Substitute a native buffer
+        int pos = src.position();
+        int lim = src.limit();
+        assert (pos <= lim);
+        int rem = (pos <= lim ? lim - pos : 0);
+        ByteBuffer bb;
+        //==========================================
+        // 这里，Kafka帮忙对齐Page Cache，
+        // 而且，都是返回DirectBuffer的实例
+        //==========================================
+        if (directIO) {
+            Util.checkRemainingBufferSizeAligned(rem, alignment);
+            bb = Util.getTemporaryAlignedDirectBuffer(rem, alignment);
+        } else {
+            bb = Util.getTemporaryDirectBuffer(rem);
+        }
+        try {
+            bb.put(src);
+            bb.flip();
+            // Do not update src until we see how many bytes were written
+            src.position(pos);
+
+            int n = writeFromNativeBuffer(fd, bb, position, directIO, alignment, nd);
+            if (n > 0) {
+                // now update src
+                src.position(pos + n);
+            }
+            return n;
+        } finally {
+            Util.offerFirstTemporaryDirectBuffer(bb);
+        }
+    }
+```
+
+IOUtil.java 中的 writeFromNativeBuffer():
+```java
+    private static int writeFromNativeBuffer(FileDescriptor fd, ByteBuffer bb,
+                                             long position, boolean directIO,
+                                             int alignment, NativeDispatcher nd)
+        throws IOException
+    {
+        int pos = bb.position();
+        int lim = bb.limit();
+        assert (pos <= lim);
+        int rem = (pos <= lim ? lim - pos : 0);
+
+        if (directIO) {
+            Util.checkBufferPositionAligned(bb, pos, alignment);
+            Util.checkRemainingBufferSizeAligned(rem, alignment);
+        }
+
+        int written = 0;
+        if (rem == 0)
+            return 0;
+        //==============================================
+        // 真正执行“写”的地方。
+        // 使用nd的pwrite()方法。此时，数据真正的算是“落盘”了
+        //==============================================
+        if (position != -1) {
+            written = nd.pwrite(fd,
+                                ((DirectBuffer)bb).address() + pos,
+                                rem, position);
+        } else {
+            written = nd.write(fd, ((DirectBuffer)bb).address() + pos, rem);
+        }
+        if (written > 0)
+            bb.position(pos + written);
+        return written;
+    }
+```
+
+FileDispatcherImpl.java 的 pwrite():
+``` java
+
+    // 就是简单的调用了native方法
+    int pwrite(FileDescriptor fd, long address, int len, long position)
+        throws IOException
+    {
+        return pwrite0(fd, address, len, position);
+    }
+
+    // 这就是native方法
+    static native int pwrite0(FileDescriptor fd, long address, int len,
+                             long position) throws IOException;
+
+
+```
+
+我们再来看看FileDispatcher.java的Native实现。 我找来了OpenJDK的源码。通过OpenJDK源码来看看最终是如何调用OS来完成“落盘”的。
+
+源码链接：[FileDispatcherImpl.c](https://github.com/openjdk/jdk/blob/1691abc7478bb83bd213b325007f14da4d038651/src/java.base/unix/native/libnio/ch/FileDispatcherImpl.c)
+
+``` c
+    #define pwrite64 pwrite  # 感兴趣的，可以阅读Linux的源码 pwrite() 方法
+
+    JNIEXPORT jint JNICALL
+     Java_sun_nio_ch_FileDispatcherImpl_pwrite0(JNIEnv *env, jclass clazz, jobject fdo,
+                            jlong address, jint len, jlong offset)
+    {
+        jint fd = fdval(env, fdo);
+        void *buf = (void *)jlong_to_ptr(address);
+
+        return convertReturnVal(env, pwrite64(fd, buf, len, offset), JNI_FALSE);
+    }
+
 ```
