@@ -9,8 +9,7 @@ Kafka对消息的处理，提供了多种方式。
 A Records implementation backed by a file. An optional start and end position can be applied to this instance to enable slicing a range of the log records.
 
 
-<pre>
-  <code>
+```java
   public class FileRecords extends AbstractRecords implements Closeable {    
     private final boolean isSlice;
     private final int start;
@@ -67,15 +66,13 @@ A Records implementation backed by a file. An optional start and end position ca
         channel.force(true);
     }
   }
-  </code>
-</pre>
+```
 
 现在来看看writeFullyTo()是如何做的。 
 
 这个方法归属于MemoreyRecords(*MemoryRecords.java*)对象（*面向对象的基本概念，没有委托给XXXService处理*）:
 
-<pre>
-  <code>
+```java
   /**
      * Write all records to the given channel (including partial records).
      * @param channel The channel to write to
@@ -93,8 +90,7 @@ A Records implementation backed by a file. An optional start and end position ca
         buffer.reset();
         return written;
     }
-  </code>
-</pre>
+```
 
 这个时候，就要深入的了解一下Channel如何实现write(ByteBuffer src)的。 
 
@@ -132,7 +128,7 @@ Linux使用了CPU的2个特权级别，分别执行“用户态”和“内核�
 
 用户的程序运行在RING3，并且不能访问RING0的地址空间；操作系统运行在Ring0，并提供系统调用，供用户态的程序使用。
 
-如果用户态的程序的某一个操作需要内核态来协助完成(*例如读取磁盘上的一段数据*)，那么用户态的程序就会通过系统调用来调用内核态的接口，请求操作系统来完成某种操作。<b>换句话说，所有的I/O操作，都是在内核态完成。</b>
+如果用户态的程序的某一个操作需要内核态来协助完成(*例如读取磁盘上的一段数据*)，那么用户态的程序就会通过系统调用来调用内核态的接口，请求操作系统来完成某种操作。<b>此时，用户空间的数据，需要COPY一份到内核空间。</b>换句话说，所有的I/O操作，都是在内核态完成。
 
 ### I/O缓冲区
 #### 概念
@@ -205,8 +201,7 @@ Address_Space是Linux内核中的一个关键抽象，它被作为文件系统�
 ### JDK中的MMAP
 
 这里研究的是FileChannelImpl这个实现类:
-<pre>
-  <code>
+```java
     public int write(ByteBuffer src) throws IOException {
         ensureOpen();
         if (!writable)
@@ -238,5 +233,4 @@ Address_Space是Linux内核中的一个关键抽象，它被作为文件系统�
             }
         }
     }
-  </code>
-</pre>
+```
