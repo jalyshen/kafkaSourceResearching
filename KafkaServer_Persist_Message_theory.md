@@ -1,5 +1,23 @@
-# Kafka持久化消息
-[toc]
+Kafka持久化消息
+=================
+- [探索Kafka消息的存储关系](#探索Kafak消息的存储关系)
+- [存储消息](#存储消息)
+  - [org.apache.kafka.common.record.FileRecords](#orgapachekafkacommonrecordfilerecords)
+  - [OS内核的文件操作](#os内核的文件操作)
+    - [CPU](#cpu)
+    - [Linux用户空间 VS 内核空间](#linux用户空间-vs-内核空间)
+    - [I/O缓冲区](#io缓冲区)
+    - [概念](#概念)
+      - [Buffer和Cache](#buffer和cache)
+      - [Buffer Cache和 Page Cache](#buffer-cache和-page-cache)
+      - [Page Cache](#page-cache)
+      - [Address Space](#address-space)
+    - [文件读写基本流程](#文件读写基本流程)
+      - [读文件](#读文件)
+      - [写文件](#写文件)
+  - [JDK中的Channel](#jdk中的channel)
+- [存储消息索引](#存储消息索引)
+  - [mmap是什么](#mmap是什么)
 
 ---
 
@@ -7,7 +25,25 @@ Kafka Server存储消息，不仅仅是消息本身，另一个重要的是消�
 
 接下来会针对这两种数据的持久化分别做说明。
 
-## 存储消息
+# 探索Kafak消息的存储关系
+Kafka提供了很多概念，用于存储具体的消息。大家熟知的有：
+
+  - Topic
+  - Partition
+  - Log
+  - LogSegment
+  - MessageSet (aka Records, there are several implements)
+  - Message (aka Record)
+
+官方也提供了对Topic这个概念的一个高度抽象的示意图: 
+
+![](img/log_anatomy.png)
+
+根据源码，把逻辑上的概念与真实的物理文件关系上了。下图展示了逻辑概念与具体文件的关系:
+
+![](img/concepts_with_real_files.png)
+
+# 存储消息
 
 Kafka对消息的封装是对象:
 
@@ -29,7 +65,7 @@ org.apache.kafka.common.record.Record (默认实现是: *DefaultRecord*)。
 ```
 但是，Kafka Server不会单独记录一条消息到介质上，而是会汇集了一批记录后再持久化到存储介质上。Kafka Server通过如下对(FileRecords)象来持久化消息的：
 
-### org.apache.kafka.common.record.FileRecords
+## org.apache.kafka.common.record.FileRecords
 这个类的官方解释：
 
 A Records implementation backed by a file. An optional start and end position can be applied to this instance to enable slicing a range of the log records.
@@ -435,3 +471,55 @@ IOUtil.java 中的 writeFromNativeBuffer():
 
 ### mmap是什么
 mmap，它是一种内存映射文件的方法，即将一个文件或者其它对象映射到进程的地址空间，实现文件磁盘地址和进程虚拟地址空间中一段虚拟地址的一一对映关系。
+
+实现这样的映射关系后，进程就可以采用指针的方式读写操作这一段内存，而系统会自动回写脏页面到对应的文件磁盘上，即完成了对文件的操作而不必再调用read,write等系统调用函数。相反，内核空间对这段区域的修改也直接反映用户空间，从而可以实现不同进程间的文件共享。
+
+下图是一个示意图，表达了“地址空间”与“文件”的关系：
+![](img/cache-space-map-buffer-space.png)
+
+### 消息的索引文件创建
+
+```scala
+  @volatile
+  protected var mmap: MappedByteBuffer = {
+    // 创建一个文件，用于存储消息的索引  
+    val newlyCreated = file.createNewFile()
+    val raf = if (writable) new RandomAccessFile(file, "rw") else new RandomAccessFile(file, "r")
+    try {
+      /* pre-allocate the file if necessary */
+      if(newlyCreated) {
+        if(maxIndexSize < entrySize)
+          throw new IllegalArgumentException("Invalid max index size: " + maxIndexSize)
+        raf.setLength(roundDownToExactMultiple(maxIndexSize, entrySize))
+      }
+    
+      //=================================
+      // 核心代码 - 把文件映射到内存
+      /* memory-map the file */
+      //=================================
+      _length = raf.length()
+      val idx = {
+        if (writable)
+          raf.getChannel.map(FileChannel.MapMode.READ_WRITE, 0, _length)
+        else
+          raf.getChannel.map(FileChannel.MapMode.READ_ONLY, 0, _length)
+      }
+      //=================================
+      // 如果是新建的索引，设置头指针位置
+      /* set the position in the index for the next entry */
+      //=================================
+      if(newlyCreated)
+        idx.position(0)
+      else
+        //==============================================================
+        // 如果是已经存在的索引文件，获取最有一个日志实体的位置作为当前的索引位置
+        // if this is a pre-existing index, 
+        // assume it is valid and set position to last entry
+        //==============================================================
+        idx.position(roundDownToExactMultiple(idx.limit(), entrySize))
+      idx
+    } finally {
+      CoreUtils.swallow(raf.close(), AbstractIndex)
+    }
+  }
+```
