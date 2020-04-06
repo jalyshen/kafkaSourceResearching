@@ -43,6 +43,10 @@ Kafka提供了很多概念，用于存储具体的消息。大家熟知的有：
 
 ![](img/concepts_with_real_files.png)
 
+具体的File，就与MessageSet（aka Records，具体实现就是FileRecoreds）紧密关联。所有的消息，都会<b>追加</b>到对应的File上。
+
+下面，就来分析这些FileRecordds是如何追加到File中的，速度是如此之快！
+
 # 存储消息
 
 Kafka对消息的封装是对象:
