@@ -1,13 +1,40 @@
 # Kafka持久化消息
-Kafka对消息的处理，提供了多种方式。
+[toc]
 
-这里关注的是Kafka如何把消息持久化到存储介质上。Kafka提供了一个重要的对象，作为消息在内存与存储介质之间的桥梁
+---
 
-## org.apache.kafka.common.record.FileRecords
+Kafka Server存储消息，不仅仅是消息本身，另一个重要的是消息的索引文件。
+
+接下来会针对这两种数据的持久化分别做说明。
+
+## 存储消息
+
+Kafka对消息的封装是对象:
+
+org.apache.kafka.common.record.Record (默认实现是: *DefaultRecord*)。
+
+这个Record的结构如下(已经在“消息生产”部分介绍过了)：
+
+```
+ Record =>
+    Length => Varint
+    Attributes => Int8
+    TimestampDelta => Varlong
+    OffsetDelta => Varint
+    Key => Bytes
+    Value => Bytes
+    Headers => [HeaderKey HeaderValue]
+      HeaderKey => String
+      HeaderValue => Bytes
+```
+但是，Kafka Server不会单独记录一条消息到介质上，而是会汇集了一批记录后再持久化到存储介质上。Kafka Server通过如下对(FileRecords)象来持久化消息的：
+
+### org.apache.kafka.common.record.FileRecords
 这个类的官方解释：
 
 A Records implementation backed by a file. An optional start and end position can be applied to this instance to enable slicing a range of the log records.
 
+现在，只关注此对象的“写”操作。通过阅读官方文档，Kafka持久化消息时，采用的是顺序读写的方式，所有的数据是“追加”到现有文件（Partition）的后面。因此，核心方法也是这里的“append”方法：
 
 ```java
   public class FileRecords extends AbstractRecords implements Closeable {    
@@ -27,11 +54,8 @@ A Records implementation backed by a file. An optional start and end position ca
     // 文件句柄
     private volatile File file;
 
-    //============================
-    //此处省略n行代码
-    //============================
+    //此处省略n行代码    
     ..............
-    //============================
 
     //============================
     // 核心代码
@@ -196,11 +220,10 @@ buffer cache和page cache两者最大的区别是缓存的粒度。buffer cache�
 这里是一个Page Cache形成的示意图：
 ![](img/create_page_cache.png)
 
+<font color=red>*Linux系统中，每个“页”的大小是4K，后面展示的代码中有标注*</font>
+
 ### Address Space
 Address_Space是Linux内核中的一个关键抽象，它被作为文件系统和页缓存的中间适配器，用来指示一个文件在页缓存中已经缓存了的物理页。因此，它是页缓存和外部设备中文件系统的桥梁。如果将文件系统可以理解成数据源，那么address_space可以说关联了内存系统和文件系统。
-
-下图是一个示意图，表达了“地址空间”与“文件”的关系：
-![](img/cache-space-map-buffer-space.png)
 
 那么页缓存是如何通过address_space实现缓冲区功能的？我们再来看完整的文件读写流程。
 
@@ -245,7 +268,7 @@ MemoryRecords使用的channle是接口<b>GatheringByteChannel</b>。官方的说
             if (direct)
                 //========================================================
                 // alignment: IO alignment value for DirectIO
-                // 对于Linux 2.4.10 + ，BlockSize大小： 4096
+                // 对于Linux 2.4.10+ ，BlockSize大小： 4096(KB)
                 // 需要与Page Cache页面对齐：
                 // 用于传递数据的缓冲区，其内存边界必须对齐为 BlockSize 的整数倍
                 // 用于传递数据的缓冲区，其传递数据的大小必须是 BlockSize 的整数倍。
@@ -364,7 +387,7 @@ IOUtil.java 中的 writeFromNativeBuffer():
     }
 ```
 
-FileDispatcherImpl.java 的 pwrite():
+上面代码的nd（NativeDispatcher），使用的实现类便是FileDispatcherImpl.java，其pwrite():
 ``` java
 
     // 就是简单的调用了native方法
@@ -381,7 +404,7 @@ FileDispatcherImpl.java 的 pwrite():
 
 ```
 
-我们再来看看FileDispatcher.java的Native实现。 我找来了OpenJDK的源码。通过OpenJDK源码来看看最终是如何调用OS来完成“落盘”的。
+此时，从JDK的Java源码已经到头了，是到了看看FileDispatcherImpl的Native实现的时候了。 这里找来了OpenJDK的源码。通过OpenJDK源码来看看最终是如何调用OS来完成“落盘”的。
 
 源码链接：[FileDispatcherImpl.c](https://github.com/openjdk/jdk/blob/1691abc7478bb83bd213b325007f14da4d038651/src/java.base/unix/native/libnio/ch/FileDispatcherImpl.c)
 
@@ -399,3 +422,16 @@ FileDispatcherImpl.java 的 pwrite():
     }
 
 ```
+到这里，我们针对Kafka Server如何持久化消息的全部过程就了解了。
+
+那么，对于消费者，Kafak Server有义务为它们提供快速检索消息的服务。那么，如何能快速地定位一条消息呢？Kafka Server为每个消息建立了相应的索引，并针对索引文件的存储提供了特殊的方法。接下来看看Kafka是如何做的呢？
+
+## 存储消息索引
+索引，就是为了快速查找到相应的消息记录，因此，索引文件需要常驻内存，并能及时的更新索引的数据，因为随时都有新的消息追加到服务器中。同时，这个索引文件需要随时存储到介质上，以防丢失。例如，服务器宕机后，Kafka Server能够重新装载索引文件，继续服务。
+
+如何保证索引文件能够及时的被更新，并及时的持久化到存储介质上呢？Kafka又一次利用了JDK7后提供的新特性：
+
+<b>mmap</b>
+
+### mmap是什么
+mmap，它是一种内存映射文件的方法，即将一个文件或者其它对象映射到进程的地址空间，实现文件磁盘地址和进程虚拟地址空间中一段虚拟地址的一一对映关系。
