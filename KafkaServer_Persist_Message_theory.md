@@ -308,11 +308,15 @@ MemoryRecords使用的channle是接口<b>GatheringByteChannel</b>。官方的说
             if (direct)
                 //========================================================
                 // alignment: IO alignment value for DirectIO
-                // 对于Linux 2.4.10+ ，BlockSize大小： 4096(KB)
+                // 对于Linux 2.4.10+ ，BlockSize大小： 4096(Byte) = 4KB
                 // 需要与Page Cache页面对齐：
                 // 用于传递数据的缓冲区，其内存边界必须对齐为 BlockSize 的整数倍
                 // 用于传递数据的缓冲区，其传递数据的大小必须是 BlockSize 的整数倍。
                 // 数据传输的开始点，即文件和设备的偏移量，必须是 BlockSize 的整数倍
+                // 
+                // 回顾一下： Producer中，设定batch.size的默认值是16384(Byte)，
+                // 16384 % 4096 = 4
+                // 而Linux的Page Cache正好是由4个Block组成
                 //=========================================================
                 Util.checkChannelPositionAligned(position(), alignment);
             int n = 0;
