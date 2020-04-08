@@ -45,6 +45,142 @@ Kafka提供了很多概念，用于存储具体的消息。大家熟知的有：
 
 具体的File，就与MessageSet（aka Records，具体实现就是FileRecoreds）紧密关联。所有的消息，都会<b>追加</b>到对应的File上。
 
+Kafka Server通过对象“KafkaServer.scala"来启动，启动时，会开启SocketServer，等待各个KafkaProducer来连接。同时，针对不同的请求，初始化各类的KafkaRequestsHandler，来处理不同的请求。我们关注对消息生产者消息的处理：
+
+KafkaApis.scala
+```java
+   def handleProduceRequest(request: RequestChannel.Request): Unit = {
+       val produceRequest = request.body[ProduceRequest]
+       ...
+       val authorizedRequestInfo = mutable.Map[TopicPartition, MemoryRecords]()
+       ...
+
+       //=======================================
+       // 根据不同的TopicPartition，获取相应的消息
+       //=======================================
+       for ((topicPartition, memoryRecords) <- produceRequest.partitionRecordsOrFail.asScala) {
+            if (!authorizedTopics.contains(topicPartition.topic))
+                unauthorizedTopicResponses += topicPartition -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
+            else if (!metadataCache.contains(topicPartition))
+                nonExistingTopicResponses += topicPartition -> new PartitionResponse(Errors.UNKNOWN_TOPIC_OR_PARTITION)
+            else
+                try {
+                    ProduceRequest.validateRecords(request.header.apiVersion(), memoryRecords)
+                    // 获取消息
+                    authorizedRequestInfo += (topicPartition -> memoryRecords)
+                } catch {
+                    case e: ApiException =>
+                        invalidRequestResponses += topicPartition -> new PartitionResponse(Errors.forException(e))
+                }
+        }
+        ...
+        if (authorizedRequestInfo.isEmpty)
+            sendResponseCallback(Map.empty)
+        else {
+            val internalTopicsAllowed = request.header.clientId == AdminUtils.AdminClientId
+
+            // call the replica manager to append messages to the replicas
+            replicaManager.appendRecords(
+                timeout = produceRequest.timeout.toLong,
+                requiredAcks = produceRequest.acks,
+                internalTopicsAllowed = internalTopicsAllowed,
+                origin = AppendOrigin.Client,
+                // 把消息追加到各个Partition中去
+                entriesPerPartition = authorizedRequestInfo,
+                responseCallback = sendResponseCallback,
+                recordConversionStatsCallback = processingStatsCallback)
+
+                // if the request is put into the purgatory, it will have a held reference and hence cannot be garbage collected;
+                // hence we clear its data here in order to let GC reclaim its memory since it is already appended to log
+            produceRequest.clearPartitionRecords()
+        }
+   }
+```
+
+现在看看ReplicaManager.scala
+```java
+    def appendRecords(timeout: Long,
+                    requiredAcks: Short,
+                    internalTopicsAllowed: Boolean,
+                    origin: AppendOrigin,
+                    entriesPerPartition: Map[TopicPartition, MemoryRecords],
+                    responseCallback: Map[TopicPartition, PartitionResponse] => Unit,
+                    delayedProduceLock: Option[Lock] = None,
+                    recordConversionStatsCallback: Map[TopicPartition, RecordConversionStats] => Unit = _ => ()): Unit = {
+        if (isValidRequiredAcks(requiredAcks)) {
+        val sTime = time.milliseconds
+        //=======================================
+        // 追加消息到当前节点
+        //==========================
+        val localProduceResults = appendToLocalLog(internalTopicsAllowed = internalTopicsAllowed,
+            origin, entriesPerPartition, requiredAcks)
+        debug("Produce to local log in %d ms".format(time.milliseconds - sTime))
+        ...
+
+    }
+
+    ...
+
+    private def appendToLocalLog(internalTopicsAllowed: Boolean,
+                               origin: AppendOrigin,
+                               entriesPerPartition: Map[TopicPartition, MemoryRecords],
+                               requiredAcks: Short): Map[TopicPartition, LogAppendResult] = {
+        ...
+        // 确定当前的消息追加到哪个Partition，是Lead的Partition
+        val partition = getPartitionOrException(topicPartition, expectLeader = true)
+        // 追加消息，返回LogAppendInfo对象。这里含有消息的offset信息
+        val info = partition.appendRecordsToLeader(records, origin, requiredAcks)
+        ...
+    }
+```
+
+然后，调用Log.scala
+```java
+    private def append(records: MemoryRecords,
+                     origin: AppendOrigin,
+                     interBrokerProtocolVersion: ApiVersion,
+                     assignOffsets: Boolean,
+                     leaderEpoch: Int): LogAppendInfo = {
+        maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+        val appendInfo = analyzeAndValidateRecords(records, origin)
+
+        // return if we have no valid messages or if this is a duplicate of the last appended entry
+        if (appendInfo.shallowCount == 0)
+        return appendInfo
+
+        //============================================================
+        // 这里可能会出现消息丢失问题。
+        // 如果消息的总长度超过了page Cache的大小，就会被阶段！！！！
+        //============================================================
+        // trim any invalid bytes or partial messages before appending it to the on-disk log
+        var validRecords = trimInvalidBytes(records, appendInfo)
+        ...
+
+        //============================================================
+        // 通过一些列的操作，把消息分配给某个Segment（LogSegment）执行追加工作
+        // 因为一个Segment关联上一个具体的文件
+        //============================================================
+        segment.append(largestOffset = appendInfo.lastOffset,
+          largestTimestamp = appendInfo.maxTimestamp,
+          shallowOffsetOfMaxTimestamp = appendInfo.offsetOfMaxTimestamp,
+          records = validRecords)
+    }
+```
+接下里就是LogSegment了：
+```java
+    def append(largestOffset: Long,
+             largestTimestamp: Long,
+             shallowOffsetOfMaxTimestamp: Long,
+             records: MemoryRecords): Unit = {
+        ...
+        // append the messages
+        // 这个log实例，FileRecords （The file records containing log entries）
+        // 这里的append方法，就是下面要详细介绍的地方了
+        val appendedBytes = log.append(records)
+        ...
+    }
+```
+
 下面，就来分析这些FileRecordds是如何追加到File中的，速度是如此之快！
 
 # 存储消息
@@ -99,6 +235,7 @@ A Records implementation backed by a file. An optional start and end position ca
 
     //============================
     // 核心代码
+    // 这里开始，承接上面介绍的append方法了
     //============================
     /**
      * Append a set of records to the file. This method is not thread-safe and must be
