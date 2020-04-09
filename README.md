@@ -1,7 +1,8 @@
-# kafkaSourceResearching
-Documentation for Study Kafka Source Codes
+# 深入Kafka内部 (Kafka Inside)
 
-The target source code version is 2.4.1
+通过分析Kafka的源码，深入了解Kafka
+
+目前Kafka最新release的代码版本是2.4.1，此次源码分析基于此版本。 
 
 * [Kafka生产者发送消息的过程](KafkaProducer_send_msg.md)
 * Kafka为消息选择Partition的过程
