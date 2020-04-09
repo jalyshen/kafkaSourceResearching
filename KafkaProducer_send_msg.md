@@ -53,7 +53,7 @@ KafKa Producer发送消息的过程
 上硬核的菜：
 ```java
   /**
-   * Implementation of asynchronously send a record to a topic.
+   * 一个消息，即使调用了该方法，也未必真的发到了kafka server
    */
   private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback) {
       // 这个对象在后续处理中非常有用
@@ -107,6 +107,11 @@ KafKa Producer发送消息的过程
           RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey,
                   serializedValue, headers, interceptCallback, remainingWaitMs, true);
           
+          //====================================================
+          // 如果发现当前要发送数据包已经装不下这条数据了，
+          // 那么就需要重新创建一个新的数据包，
+          // 当然，发送到哪个partition也要重新计算一下
+          //====================================================
           if (result.abortForNewBatch) {
               int prevPartition = partition;
               partitioner.onNewBatch(record.topic(), cluster, prevPartition);
@@ -122,7 +127,12 @@ KafKa Producer发送消息的过程
           }
           
           if (transactionManager != null && transactionManager.isTransactional())
-              transactionManager.maybeAddPartitionToTransaction(tp);  
+              transactionManager.maybeAddPartitionToTransaction(tp); 
+          //===============================================================
+          // 如果发现数据包满了（或者已经创建了新的发送包），就通知发送线程去发送数据了
+          // 一个问题： 如果创建了新的数据包，而且要发的数据在新的包中，要发送的数据是
+          // 没有发出去的。发出去的，是旧有的数据。
+          //===============================================================
           if (result.batchIsFull || result.newBatchCreated) {
               log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
               this.sender.wakeup();
