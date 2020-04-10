@@ -101,9 +101,12 @@ KafKa Producer发送消息的过程
           if (transactionManager != null && transactionManager.isTransactional()) {
               transactionManager.failIfNotReadyForSend();
           }
-          //====================================================
-          // 关键步骤：
-          //====================================================
+          //=========================================================================
+          // 最核心的步骤了。
+          // 此方法的含义是：把序列化后的消息发送到指定的Topic + Partition 组合中去，
+          // 并且，如果当前的发送数据包（batch）已经满了，就创建新的数据包
+          // 下面，我们好好研究这个RecordAccumulator的append()方法
+          //=========================================================================
           RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey,
                   serializedValue, headers, interceptCallback, remainingWaitMs, true);
           
@@ -121,7 +124,13 @@ KafKa Producer发送消息的过程
                   log.trace("Retrying append due to new batch creation for topic {} partition {}. The old partition was {}", record.topic(), partition, prevPartition);
               }
               // producer callback will make sure to call both 'callback' and interceptor callback
-              interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);  
+              interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);
+              //===============================================================================
+              // 同上边对此方法的注释。 此处只是最后一个参数改为了“false”，
+              // 这个参数的含义是： 
+              // 创建一个新的Batch之前返回，并且在再此尝试添加到发送包之前执行partition的onNewBatch方法。
+              // 此处设置为“false”，是因为刚刚创建了一个新的Batch。
+              //===============================================================================
               result = accumulator.append(tp, timestamp, serializedKey,
                   serializedValue, headers, interceptCallback, remainingWaitMs, false);
           }
@@ -147,6 +156,247 @@ KafKa Producer发送消息的过程
       ... // 后续代码都是异常处理， 省略
   }
 ```
+
+RecordAccumulator.java， 顾名思义，就是收集消息的地方。 
+
+这个对象，不仅仅是收集当前节点需要发送的消息，还需要汇总其他节点的消息。后续我们会介绍到。
+
+```java
+    public RecordAppendResult append(TopicPartition tp,
+                                     long timestamp,
+                                     byte[] key,
+                                     byte[] value,
+                                     Header[] headers,
+                                     Callback callback,
+                                     long maxTimeToBlock,
+                                     boolean abortOnNewBatch) throws InterruptedException {
+        // We keep track of the number of appending thread to make sure we do not miss batches in
+        // abortIncompleteBatches().
+        appendsInProgress.incrementAndGet();
+        ByteBuffer buffer = null;
+        if (headers == null) headers = Record.EMPTY_HEADERS;
+        try {
+            // check if we have an in-progress batch
+            Deque<ProducerBatch> dq = getOrCreateDeque(tp);
+            synchronized (dq) {
+                if (closed)
+                    throw new KafkaException("Producer closed while send in progress");
+                
+                //================================================
+                // 如果已经有一个正在等待消息的数据包，那就尝试追加到该包上
+                // 如果追加成功，就返回结果。                
+                //================================================
+                RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq);
+                if (appendResult != null)
+                    return appendResult;
+            }
+
+            // 这个是调用发法前设置的逻辑。 
+            if (abortOnNewBatch) {
+                // Return a result that will cause another call to append.
+                return new RecordAppendResult(null, false, false, true);
+            }
+            
+            //====================================================
+            // 如果当前没有正在等待接收消息的数据包，那就试图创建一个新的
+            //====================================================
+            byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
+            int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
+            log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+            buffer = free.allocate(size, maxTimeToBlock);
+            synchronized (dq) {
+                // Need to check if producer is closed again after grabbing the dequeue lock.
+                if (closed)
+                    throw new KafkaException("Producer closed while send in progress");
+
+                RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq);
+                if (appendResult != null) {
+                    // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
+                    return appendResult;
+                }
+
+                MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
+                ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, time.milliseconds());
+                FutureRecordMetadata future = Objects.requireNonNull(batch.tryAppend(timestamp, key, value, headers,
+                        callback, time.milliseconds()));
+
+                dq.addLast(batch);
+                incomplete.add(batch);
+
+                // Don't deallocate this buffer in the finally block as it's being used in the record batch
+                buffer = null;
+                return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true, false);
+            }
+        } finally {
+            if (buffer != null)
+                free.deallocate(buffer);
+            appendsInProgress.decrementAndGet();
+        }
+    }
+```
+
+业务逻辑是上面代码表达了。真正把数据添加到发送数据包的，则是这个方法：
+```java
+    private RecordAppendResult tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers,
+                                         Callback callback, Deque<ProducerBatch> deque) {
+        ProducerBatch last = deque.peekLast();
+        if (last != null) {
+            FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, time.milliseconds());
+            if (future == null)
+                last.closeForRecordAppends();
+            else
+                return new RecordAppendResult(future, deque.size() > 1 || last.isFull(), false, false);
+        }
+        return null;
+    }
+```
+
+很简单，直接看ProducerBatch的tryAppend():
+
+```java
+    public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
+        if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
+            return null;
+        } else {
+            //===============================================================
+            // 通过一个Builder类来完成
+            //===============================================================
+            Long checksum = this.recordsBuilder.append(timestamp, key, value, headers);
+            this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
+                    recordsBuilder.compressionType(), key, value, headers));
+            this.lastAppendTime = now;
+            FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
+                                                                   timestamp, checksum,
+                                                                   key == null ? -1 : key.length,
+                                                                   value == null ? -1 : value.length,
+                                                                   Time.SYSTEM);
+            // we have to keep every future returned to the users in case the batch needs to be
+            // split to several new batches and resent.
+            thunks.add(new Thunk(callback, future));
+            this.recordCount++;
+            return future;
+        }
+    }
+```
+
+MemoryRecordsBuilder.java的append最后调用的方法：
+```java
+    /**
+     * Append a record and return its checksum for message format v0 and v1, or null for v2 and above.
+     */
+    private Long appendWithOffset(long offset, boolean isControlRecord, long timestamp, ByteBuffer key,
+                                  ByteBuffer value, Header[] headers) {
+        try {
+            // 省略一些check代码
+            ....
+
+            // 根据版本决定使用哪个格式的Record
+            if (magic > RecordBatch.MAGIC_VALUE_V1) {
+                appendDefaultRecord(offset, timestamp, key, value, headers);
+                return null;
+            } else {
+                return appendLegacyRecord(offset, timestamp, key, value, magic);
+            }
+        } catch (IOException e) {
+            throw new KafkaException("I/O exception when writing to the append stream, closing", e);
+        }
+    }
+```
+
+一般的，这里只研究最新的代码。只看appendDefaultRecord()。 
+```java
+    
+    private void appendDefaultRecord(long offset, long timestamp, ByteBuffer key, ByteBuffer value,
+                                     Header[] headers) throws IOException {
+        ensureOpenForRecordAppend();
+        int offsetDelta = (int) (offset - baseOffset);
+        long timestampDelta = timestamp - firstTimestamp;
+        //==============================================================
+        // 第一个参数很关键。 查看了MemoryRecordsBuilder，是这样定义的：
+        //     Used to append records, may compress data on the fly
+        //     private DataOutputStream appendStream
+        // 消息最终就会写到这个stream里
+        //==============================================================
+        int sizeInBytes = DefaultRecord.writeTo(appendStream, offsetDelta, timestampDelta, key, value, headers);
+        recordWritten(offset, timestamp, sizeInBytes);
+    }
+```
+
+最后，深入writeTo()，看看数据是如何写到Stream里的：
+```java
+    //==============================================================
+    // out： Used to append records, may compress data on the fly
+    //==============================================================
+    public static int writeTo(DataOutputStream out,
+                              int offsetDelta,
+                              long timestampDelta,
+                              ByteBuffer key,
+                              ByteBuffer value,
+                              Header[] headers) throws IOException {
+        int sizeInBytes = sizeOfBodyInBytes(offsetDelta, timestampDelta, key, value, headers);
+        ByteUtils.writeVarint(sizeInBytes, out);
+
+        byte attributes = 0; // there are no used record attributes at the moment
+        out.write(attributes);
+
+        ByteUtils.writeVarlong(timestampDelta, out);
+        ByteUtils.writeVarint(offsetDelta, out);
+
+        if (key == null) {
+            ByteUtils.writeVarint(-1, out);
+        } else {
+            int keySize = key.remaining();
+            ByteUtils.writeVarint(keySize, out);
+            //==============================================
+            // 把序列化后的key写到Stream里
+            //==============================================
+            Utils.writeTo(out, key, keySize);
+        }
+
+        if (value == null) {
+            ByteUtils.writeVarint(-1, out);
+        } else {
+            int valueSize = value.remaining();
+            ByteUtils.writeVarint(valueSize, out);
+            //==============================================
+            // 把序列化后的value写到Stream里
+            //==============================================
+            Utils.writeTo(out, value, valueSize);
+        }
+
+        if (headers == null)
+            throw new IllegalArgumentException("Headers cannot be null");
+
+        ByteUtils.writeVarint(headers.length, out);
+
+        //==============================================
+        // 把message的头信息写到Stream里
+        //==============================================        
+        for (Header header : headers) {
+            String headerKey = header.key();
+            if (headerKey == null)
+                throw new IllegalArgumentException("Invalid null header key found in headers");
+
+            byte[] utf8Bytes = Utils.utf8(headerKey);
+            ByteUtils.writeVarint(utf8Bytes.length, out);
+            out.write(utf8Bytes);
+
+            byte[] headerValue = header.value();
+            if (headerValue == null) {
+                ByteUtils.writeVarint(-1, out);
+            } else {
+                ByteUtils.writeVarint(headerValue.length, out);
+                out.write(headerValue);
+            }
+        }
+
+        return ByteUtils.sizeOfVarint(sizeInBytes) + sizeInBytes;
+    }
+```
+
+
+上述的过程，可以总结成如下的图，直观的描述了Producer发送消息的过程：
+
 ![](img/KafkaProducer-sendi-meesage-process.png)
 
 # Kafka汇总各个Producer消息的过程
