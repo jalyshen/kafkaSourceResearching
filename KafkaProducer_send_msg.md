@@ -444,10 +444,30 @@ MemoryRecordsBuilder.java的append最后调用的方法：
                 log.error("Uncaught error in kafka producer I/O thread: ", e);
             }
         }
-        // 省略很多代码
+
+        //=====================================================================
+        // 省略很多代码，主要是处理这个的问题：
+        // 如果线程被停止，可能RecordAccumulator中还有数据没有发送出去，要让线程优雅地停止
+        // 自行看代码吧
+        //=====================================================================
         ...        
-    }    
+    }
+
+    /**
+     * Run a single iteration of sending
+     *
+     */
+    void runOnce() {
+        ...
+        //===============================
+        // 发送消息，调用获取response的方法
+        //===============================
+        long pollTimeout = sendProducerData(currentTimeMs);
+        client.poll(pollTimeout, currentTimeMs);   
+    }
+
 ```
+
 具体处理方式：
 ```java
     private long sendProducerData(long now) {
@@ -469,7 +489,10 @@ MemoryRecordsBuilder.java的append最后调用的方法：
         // 省略一些check代码
         ...
 
-        // 移除无法连接成功的节点
+        //===============================================
+        // 通过NetworkClient（this.client）对象过滤无效节点
+        // 下一步整理消息时，会根据节点来归类
+        //===============================================
         Iterator<Node> iter = result.readyNodes.iterator();
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
@@ -487,8 +510,10 @@ MemoryRecordsBuilder.java的append最后调用的方法：
         // 创建发送的请求对象
         //-------------------------------
         // 这一步很关键，用的词（drain）也很形象：
-        // 沥干给定节点的所有数据，并将它们整理成一个按每个节点适合指定大小的批列表。
-        // 此方法试图避免反复选择相同的主题节点。
+        // 筛选出混存在accumulator中的消息，可以向哪些节点发送。
+        // 并且为每个节点（Node）创建按每个节点适合指定大小的消息批列表。
+        // 
+        // 注意：这里只针对已经可以接收消息的节点进行处理。
         //==========================================================
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
         addToInflightBatches(batches);
@@ -517,9 +542,10 @@ MemoryRecordsBuilder.java的append最后调用的方法：
         // 省略一些计算发送这些消息等待Broker的Response时长
         ...
 
-        //==================
+        //======================================================
         // 发送数据
-        //==================
+        // 根据前面消息的整理，每个Node会创建一个Request
+        //======================================================
         sendProduceRequests(batches, now);
 
         // 这个pollTimeout，是接收Response的时间
@@ -530,9 +556,54 @@ MemoryRecordsBuilder.java的append最后调用的方法：
 这里的sendProduceRequests()又有很多次方法调用，这里不在贴代码。直接定位到最后，是JDK的I/O把数据发送出去。
 
 # KafkaProducer发送消息的模型
-在介绍NIO前，就可以把KafkaProducer发送消息的模型直观的画出来了。
+
+到这里，就可以把KafkaProducer发送消息的模型直观的画出来了。
+
 ![](img/message-sending-model.png)
 
+## Sender唤醒过程
+
+这个唤醒过程挺有意思。通过代码的追踪，通过调用sender线程的wakeup()，其实是Sender去唤醒NetworkClient（这里不是线程了，是通知客户端开始服务了），这个client会去唤醒Selector。 来看看代码：
+
+主线程：
+```java
+    if (result.batchIsFull || result.newBatchCreated) {        
+        this.sender.wakeup();
+    }
+```
+
+然后是Sender.java
+```java
+    /**
+     * Wake up the selector associated with this send thread
+     */
+    public void wakeup() {
+        this.client.wakeup();
+    }
+```
+
+接下来是NetworkClient.java
+```java
+    /**
+     * Interrupt the client if it is blocked waiting on I/O.
+     */
+    @Override
+    public void wakeup() {
+        this.selector.wakeup();
+    }
+```
+
+然后就是NIO的Selector.java了：
+```java
+    /**
+     * Interrupt the nioSelector if it is blocked waiting to do I/O.
+     */
+    @Override
+    public void wakeup() {
+        this.nioSelector.wakeup();
+    }
+```
+极有可能有线程在select等待事件被阻塞了，通过wakeup唤醒那个线程开始工作.
 
 # 消息网络传输过程
 这里涉及到Java的NIO。 了解NIO前，先看看发送的代码。 NIO使用Channel作为通道发送数据。 Kafka创建了KafkaChanne对象：
