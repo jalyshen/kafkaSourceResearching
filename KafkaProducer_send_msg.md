@@ -412,6 +412,10 @@ MemoryRecordsBuilder.java的append最后调用的方法：
 
 ![](img/KafkaProducer-sendi-meesage-process.png)
 
+细化一下Producer的Cache对象存储Message的结构:
+
+![](img/RecordAccumulator_Batch_structure.png)
+
 # 自身角度看Producer发送消息过程
 
 通过上面的分析，已经了解，当Kafka通过KafkaProducer的send()方法把消息交给Kafka后，消息并没有及时的被传输给Server。而是通过一些列的操作，被放到一个数据包中，等待数据包满了以后，再“唤醒”一个叫做Sender的家伙（一个Thread对象）。
