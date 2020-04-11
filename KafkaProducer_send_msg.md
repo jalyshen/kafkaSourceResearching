@@ -429,7 +429,7 @@ MemoryRecordsBuilder.java的append最后调用的方法：
  > <P>The <b>background thread</b> that handles the sending of produce requests to the Kafka cluster. <br/>This thread makes metadata requests to renew its view of the cluster and then sends produce requests to the appropriate nodes.
  </p>
 
-显然，这是一个守候线程，等到收集到足够的数据，就发送数据。那么，重要逻辑应该就在这个线程对象的run()方法里：
+显然，这是一个守候线程，等到收集到足够的数据，就发送数据。那么，重要逻辑应该就在这个Sender线程对象的run()方法里：
 ```java
     /**
      * The main run loop for the sender thread
@@ -440,9 +440,6 @@ MemoryRecordsBuilder.java的append最后调用的方法：
         // main loop, runs until close is called
         while (running) {
             try {
-                //===============================
-                // 这里调用了sendProducerData()
-                //===============================
                 runOnce();
             } catch (Exception e) {
                 log.error("Uncaught error in kafka producer I/O thread: ", e);
@@ -463,9 +460,11 @@ MemoryRecordsBuilder.java的append最后调用的方法：
      */
     void runOnce() {
         ...
-        //===============================
-        // 发送消息，调用获取response的方法
-        //===============================
+        //===========================================
+        // 发送消息.
+        // 返回值有意思，是一个long，一个表示时间的毫秒数
+        // 这个数，表示等待Response的最大时间
+        //===========================================
         long pollTimeout = sendProducerData(currentTimeMs);
         client.poll(pollTimeout, currentTimeMs);   
     }
