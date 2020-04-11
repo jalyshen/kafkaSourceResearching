@@ -5,7 +5,7 @@ KafKa Producer发送消息的过程
   - [Producer发送消息流程总结](#Producer发送消息流程总结)
 - [自身角度看Producer发送消息过程](#自身角度看Producer发送消息过程)
   - [KafkaProducer发送消息的模型](#KafkaProducer发送消息的模型)
-- [消息网络传输过程](#消息网络传输过程)
+- [Kafka的Producer与Server之间的网络结构](#Kafka的Producer与Server之间的网络结构)
 
 # 使用者角度看Producer发送消息的过程<br/>
 从Kafka提供的API来看，一个消息生产者发送消息还是很简单的。
@@ -608,8 +608,16 @@ MemoryRecordsBuilder.java的append最后调用的方法：
 ```
 极有可能有线程在select等待事件被阻塞了，通过wakeup唤醒那个线程开始工作.
 
-# 消息网络传输过程
-这里涉及到Java的NIO。 了解NIO前，先看看发送的代码。 NIO使用Channel作为通道发送数据。 Kafka创建了KafkaChanne对象：
+# Kafka的Producer与Server之间的网络结构
+已经知道Kafka使用的是NIO，那就看看Kafka的Producer与Server之间的网络是和关系。
+前面提到，NIO主要涉及到的几个对象：
+  - Selector
+  - Channel
+  - Buffer
+
+Kafka创建了一个KafkaClient来管理各个节点（Node）与Channel(Kafka也创建了KafkaChannel对象来增强Cnannel功能)关系。 下图很好的展示它们之间的关系：
+![](img/kafka_client_with_channel.png)
+
 
 ```java
     //==================================================
