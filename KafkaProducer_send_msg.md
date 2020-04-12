@@ -214,8 +214,16 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
             // 如果当前没有正在等待接收消息的数据包，那就试图创建一个新的
             //====================================================
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
+            //====================================================
+            // 估算当前消息的大小，并与用户自己配置的batchSize比较，
+            // 如果预估的消息大小<= 预设的batchSize，则使用batchSize
+            // 否则需要使用消息实际的大小
+            //====================================================
             int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+            //====================================================
+            // 在已经开辟的内存空间中，为新的消息申请新的贮存地址空间
+            //====================================================
             buffer = free.allocate(size, maxTimeToBlock);
             synchronized (dq) {
                 // Need to check if producer is closed again after grabbing the dequeue lock.
@@ -227,12 +235,16 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
                     // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
                     return appendResult;
                 }
-
+                //===================================
+                // 把消息封装到ProductBatch里
+                //===================================
                 MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
                 ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, time.milliseconds());
                 FutureRecordMetadata future = Objects.requireNonNull(batch.tryAppend(timestamp, key, value, headers,
                         callback, time.milliseconds()));
-
+                //===================================
+                // 把记录放到队列的末尾
+                //===================================
                 dq.addLast(batch);
                 incomplete.add(batch);
 
@@ -359,10 +371,11 @@ MemoryRecordsBuilder.java的append最后调用的方法：
             ByteUtils.writeVarint(-1, out);
         } else {
             int keySize = key.remaining();
-            ByteUtils.writeVarint(keySize, out);
-            //==============================================
-            // 把序列化后的key写到Stream里
-            //==============================================
+            //==================================
+            // 1.写入key的长度，便于读取key时使用
+            // 2.把序列化后的key写到Stream里
+            //==================================
+            ByteUtils.writeVarint(keySize, out);            
             Utils.writeTo(out, key, keySize);
         }
 
@@ -370,10 +383,11 @@ MemoryRecordsBuilder.java的append最后调用的方法：
             ByteUtils.writeVarint(-1, out);
         } else {
             int valueSize = value.remaining();
-            ByteUtils.writeVarint(valueSize, out);
-            //==============================================
-            // 把序列化后的value写到Stream里
-            //==============================================
+            //==================================
+            // 1. 先记录Value的长度，读取数据时使用
+            // 2. 把序列化后的value写到Stream里
+            //==================================
+            ByteUtils.writeVarint(valueSize, out);            
             Utils.writeTo(out, value, valueSize);
         }
 
@@ -618,21 +632,6 @@ MemoryRecordsBuilder.java的append最后调用的方法：
 Kafka创建了一个KafkaClient来管理各个节点（Node）与Channel(Kafka也创建了KafkaChannel对象来增强Cnannel功能)关系。 下图很好的展示它们之间的关系：
 ![](img/kafka_client_with_channel.png)
 
+另外，Kafka使用了Zero-Copy特性发送数据。此处不在赘述。
 
-```java
-    //==================================================
-    // 这里的Send真实对象，是Kafka自定义的NetworkSend
-    //==================================================
-    public void setSend(Send send) {
-        if (this.send != null)
-            throw new IllegalStateException("Attempt to begin a send operation with prior send operation still in progress, connection id is " + id);
-        this.send = send;
-        // 采用Zero-Copy
-        this.transportLayer.addInterestOps(SelectionKey.OP_WRITE);
-    }
-
-    //实例化一个Send对象
-    public Send toSend(String destination, RequestHeader header) {
-        return new NetworkSend(destination, serialize(header));
-    }
-```
+接下来，大家可以看看Kafka Server在接到消息后，如何[持久化](#KafkaServer_Persist_Message_theory.md)到存储介质上的。
