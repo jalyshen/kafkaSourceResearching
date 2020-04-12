@@ -634,4 +634,4 @@ Kafka创建了一个KafkaClient来管理各个节点（Node）与Channel(Kafka�
 
 另外，Kafka使用了Zero-Copy特性发送数据。此处不在赘述。
 
-接下来，大家可以看看Kafka Server在接到消息后，如何[持久化](#KafkaServer_Persist_Message_theory.md)到存储介质上的。
+接下来，大家可以看看Kafka Server在接到消息后，如何[持久化](KafkaServer_Persist_Message_theory.md)到存储介质上的。
