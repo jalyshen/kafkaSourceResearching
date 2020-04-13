@@ -214,16 +214,26 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
             // 如果当前没有正在等待接收消息的数据包，那就试图创建一个新的
             //====================================================
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
-            //====================================================
-            // 估算当前消息的大小，并与用户自己配置的batchSize比较，
+            //======================================================================
+            // 估算当前消息的大小，并与用户自己配置的batchSize(默认值是1024 * 4 * 4)比较，
             // 如果预估的消息大小<= 预设的batchSize，则使用batchSize
             // 否则需要使用消息实际的大小
-            //====================================================
+            //======================================================================
             int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
-            //====================================================
-            // 在已经开辟的内存空间中，为新的消息申请新的贮存地址空间
-            //====================================================
+            //=========================================================================================
+            // 根据消息的实际大小，去申请堆内存。
+            // 注意：
+            //    如果消息的大小小于batchSize，使用的是batchSize。 
+            //    这里的free对象是一个ByteBuffer的双向链表，里面每个元素预申请的堆空间就是batchSize的大小
+            //    Linux的page cache大小是16k = 4 * 4 * 1024 （默认配置）
+            //    此默认设置是有深意的。可以快速的提升内存申请效率，提高服务的效能
+            //
+            //    如果消息小于默认配置，buffer的剩余内容会被“0”填充
+            //
+            //    如果消息超过了16k，并且当前Producer的主存还有足够的容量，就会开辟出一块内存
+            //    否则，就是out of Momery，就只能等待了
+            //=========================================================================================
             buffer = free.allocate(size, maxTimeToBlock);
             synchronized (dq) {
                 // Need to check if producer is closed again after grabbing the dequeue lock.
