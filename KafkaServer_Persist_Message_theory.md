@@ -39,12 +39,18 @@ KafkaApis.scala
    def handleProduceRequest(request: RequestChannel.Request): Unit = {
        val produceRequest = request.body[ProduceRequest]
        ...
+       //======================================
+       // 把收到的消息，根据TopicPartition进行分类
+       // 然后存储到这个容器里
+       // mutable， Scala的一个可变容量的map容器
+       //======================================
        val authorizedRequestInfo = mutable.Map[TopicPartition, MemoryRecords]()
        ...
 
-       //=======================================
-       // 根据不同的TopicPartition，获取相应的消息
-       //=======================================
+       //===============================================
+       // 根据不同的TopicPartition，对消息进行归类
+       // 存储到刚刚定义的局部容器 authorizedRequestInfo 中
+       //===============================================
        for ((topicPartition, memoryRecords) <- produceRequest.partitionRecordsOrFail.asScala) {
             if (!authorizedTopics.contains(topicPartition.topic))
                 unauthorizedTopicResponses += topicPartition -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
@@ -53,14 +59,19 @@ KafkaApis.scala
             else
                 try {
                     ProduceRequest.validateRecords(request.header.apiVersion(), memoryRecords)
-                    // 获取消息
+                    //==============================
+                    // 根据TopicPartition，归类消息
+                    //==============================
                     authorizedRequestInfo += (topicPartition -> memoryRecords)
                 } catch {
                     case e: ApiException =>
                         invalidRequestResponses += topicPartition -> new PartitionResponse(Errors.forException(e))
                 }
         }
+        
+        // 省略一堆代码
         ...
+
         if (authorizedRequestInfo.isEmpty)
             sendResponseCallback(Map.empty)
         else {
@@ -160,9 +171,11 @@ KafkaApis.scala
              shallowOffsetOfMaxTimestamp: Long,
              records: MemoryRecords): Unit = {
         ...
+        //==================================================================
         // append the messages
         // 这个log实例，FileRecords （The file records containing log entries）
         // 这里的append方法，就是下面要详细介绍的地方了
+        //==================================================================
         val appendedBytes = log.append(records)
         ...
     }
