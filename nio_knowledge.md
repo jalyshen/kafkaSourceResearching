@@ -25,10 +25,14 @@ Java NIO
 Cache大家还是蛮熟悉的。现代操作系统也大量使用了各种Cache。通常，耳熟能详的主要有这两个：Buffer_cache和Page_cache。
 
 ## Buffer Cache
-数据最终是要写到硬盘上的，硬盘读取数据，是一个扇区一个扇区的读的。扇区，是硬盘的最小存储单位。
-但是，操作系统下的“文件系统”是不可能一个扇区一个扇区的读写数据的，而是有一个“Block（块）”的概念。对于文件而言，“block”是文件读写的最小单位。
+数据的读/写，是一个扇区一个扇区的读/写的，但从操作系统角度，是通过一个“Block（块）”的概念来组织数据读/写的。
 
-Buffer cache就是“Block（块）”的缓冲器，是<b>对物理磁盘的缓冲（真正物理存储的最小单位是扇区）。对于现在的硬盘，Buffer Cache大小一般是4K大小。</b>有了Buffer Cache，应用程序多次读取磁盘上同一块的数据时，就会减少磁盘的寻址时间，也减少数据COPY时间，提高访问速度。
+Buffer cache就是“Block（块）”的缓冲器，是<b>对物理磁盘的缓冲（真正物理存储的最小单位是扇区）。对于现在的硬盘，Buffer Cache大小一般是<font color=red>4K</font>大小。</b>
+有了Buffer Cache，应用程序多次读取磁盘上同一块的数据时，就会减少磁盘的寻址时间，也减少数据COPY时间，提高访问速度。
+
+CentOS7的Block Size:
+
+![](img/block_size.png)
 
 对Buffer Cache的<b>写</b>操作分为2种。通常，对于Cache内数据的写方式都是这两种：
   * 直接写(Write Through)：程序把数据写到Buffer Cache后，OS直接写入磁盘
@@ -39,7 +43,11 @@ Buffer cache就是“Block（块）”的缓冲器，是<b>对物理磁盘的缓
 ## Page Cache
 Page Cache，简称“页”，是<b>面向文件</b>，介于<b>内存和文件之间</b>，是内存与文件之间的一座桥梁。<b>是一种“逻辑”上的缓存。</b>
 
+一个“Page Cache(页)”通常由若干“Block Cache”组成，这些“block”不一定是物理上连续的空间。
+
 <b>应用程序进行的文件I/O操作，实际上只和Page Cache交互，不直接和内存交互，更不会和硬盘或者存储介质交互。</b>
+
+就像Block Cache是磁盘读/写的最小单位一样，Page Cache(页)是文件组织的一个最小单位。
 
 注：<font color=red>*32位的Linux系统中，每个“页”的大小是4K；64位的Linux的“页”大小是8K。*</font>
 
