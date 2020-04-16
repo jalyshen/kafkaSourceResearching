@@ -140,6 +140,18 @@ KafkaApis.scala
                      assignOffsets: Boolean,
                      leaderEpoch: Int): LogAppendInfo = {
         maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+
+        //============================================================================================================================
+        // 这里会计算当前的消息大小。 
+        //----------------------------------------------
+        // 方法里，判断大小（配置文件项： max.message.bytes，默认值1000012）：
+        // if (batchSize > config.maxMessageSize) {
+        //     brokerTopicStats.topicStats(topicPartition.topic).bytesRejectedRate.mark(records.sizeInBytes)
+        //     brokerTopicStats.allTopicsStats.bytesRejectedRate.mark(records.sizeInBytes)
+        //     throw new RecordTooLargeException(s"The record batch size in the append to $topicPartition is $batchSize bytes " +
+        //          s"which exceeds the maximum configured value of ${config.maxMessageSize}.")
+        // }
+        //============================================================================================================================
         val appendInfo = analyzeAndValidateRecords(records, origin)
 
         // return if we have no valid messages or if this is a duplicate of the last appended entry
@@ -148,7 +160,7 @@ KafkaApis.scala
 
         //============================================================
         // 这里可能会出现消息丢失问题。
-        // 如果消息的总长度超过了page Cache的大小，就会被阶段！！！！
+        // 如果消息的总长度超过了max.message.bytes的大小，就会被阶段！！！！
         //============================================================
         // trim any invalid bytes or partial messages before appending it to the on-disk log
         var validRecords = trimInvalidBytes(records, appendInfo)
@@ -164,7 +176,7 @@ KafkaApis.scala
           records = validRecords)
     }
 ```
-接下里就是LogSegment了：
+接下里就是<b>LogSegment</b>了。因为Segment对应的就是真实的文件：
 ```java
     def append(largestOffset: Long,
              largestTimestamp: Long,
@@ -548,3 +560,127 @@ IOUtil.java 中的 writeFromNativeBuffer():
     }
   }
 ```
+这个Channel，有2个实现，一个是Java版本，另一个是C版本。JVM先使用Java版本，然后真正执行的是C版本。这2个Channel的实现分别是：
+
+Java的FileChannelImpl:
+```java
+    public MappedByteBuffer map(MapMode mode, long position, long size)
+        throws IOException
+    {
+        // 确保文件是打开的状态
+        ensureOpen();
+
+        // 忽略一堆判断
+        ....
+
+        try {
+            beginBlocking();
+            ti = threads.add();
+            if (!isOpen())
+                return null;
+
+            long mapSize;
+            int pagePosition;
+            synchronized (positionLock) {
+                long filesize;
+                do {
+                    filesize = nd.size(fd);
+                } while ((filesize == IOStatus.INTERRUPTED) && isOpen());
+                
+                //又是各种判断,省略
+                ....
+
+                pagePosition = (int)(position % allocationGranularity);
+                long mapPosition = position - pagePosition;
+                mapSize = size + pagePosition;
+                try {
+                    //===================
+                    // 创建一个文件映射
+                    // 关注这里的map0方法
+                    //===================
+                    addr = map0(imode, mapPosition, mapSize);
+                } catch (OutOfMemoryError x) {
+                    // An OutOfMemoryError may indicate that we've exhausted
+                    // memory so force gc and re-attempt map
+                    System.gc();
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException y) {
+                        Thread.currentThread().interrupt();
+                    }
+                    try {
+                        addr = map0(imode, mapPosition, mapSize);
+                    } catch (OutOfMemoryError y) {
+                        // After a second OOME, fail
+                        throw new IOException("Map failed", y);
+                    }
+                }
+            } // synchronized
+
+            //省咯文件描述对象操作
+            ...
+        } finally {
+            threads.remove(ti);
+            endBlocking(IOStatus.checkAll(addr));
+        }
+    }
+
+
+    // -- Native methods --
+
+
+    // 实际上，就是调用了一个本地方法。具体实现就在FileChannelImpl.c中实现的
+    private native long map0(int prot, long position, long length)
+        throws IOException;
+```
+那么C版本的FileChannelImpl.c:
+```c
+JNIEXPORT jlong JNICALL
+Java_sun_nio_ch_FileChannelImpl_map0(JNIEnv *env, jobject this,
+                                     jint prot, jlong off, jlong len)
+{
+    void *mapAddress = 0;
+    jobject fdo = (*env)->GetObjectField(env, this, chan_fd);
+    jint fd = fdval(env, fdo);
+    int protections = 0;
+    int flags = 0;
+
+    if (prot == sun_nio_ch_FileChannelImpl_MAP_RO) {
+        protections = PROT_READ;
+        flags = MAP_SHARED;
+    } else if (prot == sun_nio_ch_FileChannelImpl_MAP_RW) {
+        protections = PROT_WRITE | PROT_READ;
+        flags = MAP_SHARED;
+    } else if (prot == sun_nio_ch_FileChannelImpl_MAP_PV) {
+        protections =  PROT_WRITE | PROT_READ;
+        flags = MAP_PRIVATE;
+    }
+
+    //========================
+    // 直接调用了OS的系统调用函数
+    //=========================
+    mapAddress = mmap64(
+        0,                    /* Let OS decide location */
+        len,                  /* Number of bytes to map */
+        protections,          /* File permissions */
+        flags,                /* Changes are shared */
+        fd,                   /* File descriptor of mapped file */
+        off);                 /* Offset into file */
+
+    if (mapAddress == MAP_FAILED) {
+        if (errno == ENOMEM) {
+            JNU_ThrowOutOfMemoryError(env, "Map failed");
+            return IOS_THROWN;
+        }
+        return handle(env, -1, "Map failed");
+    }
+
+    return ((jlong) (unsigned long) mapAddress);
+}
+
+//=========================================
+// 系统调用的mmap设置别名，表示为64位的mmap映射
+//=========================================
+#define mmap64 mmap
+```
+如果还有兴趣，可以看Linux内核源码，看看这个mmap如何实现映射的。
