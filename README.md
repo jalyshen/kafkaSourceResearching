@@ -2,6 +2,8 @@
 
 通过分析Kafka的源码，深入了解Kafka
 
+<b>如果转载，请注明出处！</b>
+
 目前Kafka最新release的代码版本是2.4.1，此次源码分析基于此版本。 
 
 * [NIO介绍](nio_knowledge.md)
