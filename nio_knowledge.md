@@ -91,6 +91,23 @@ JDK大概从1.4版本开始引入NIO（非阻塞I/O）,也叫做New I/O；从1.7
 Kafka使用的NIO，也是充分利用了AIO特性的。
 
 ## I/O多路复用
-I/O Multiplexing，俗称I/O多路复用技术，或者叫做Event Drien I/O，就是我们常说的Selector/Epoll。好处就是单个process就可以<b>同时处理</b>多个网络连接。它的基本原理就是Selector/Epoll这个function会不断轮训所负责的所有Socket连接，当某个Socket有数据到达，就通知用户进程。
+I/O Multiplexing，俗称I/O多路复用技术，或者叫做Event Drien I/O，就是我们常说的Selector/Epoll。好处就是单个process（进程）就可以<b>同时处理</b>多个网络连接。它的基本原理就是Selector/Epoll这个function会不断轮训所负责的所有Socket连接，当某个Socket有数据到达，就通知用户进程。
+
+这里需要简单介绍下Selector/Epoll 的基本概念。
+
+先来介绍下Select方法：
+
+每个Socket会被加入到一个进程中（一个进程会监控多个Socket对象，一般默认是1024个）。如果这个进程监控的所有Socket都没有接收到数据，该进程就会被阻塞。
+如果某个Socket接收到了数据（数据已经写入内核态内存），就会给CPU发送中断指令，把该Socket所在的进程唤醒（进入工作队列）。然后OS就会遍历进程中所有的Socket对象，把有数据的Socket挑选出来，然后执行下一步的操作。
+
+这样做的方式不够高效，需要遍历整个列表。
+
+Epoll: 
+
+Epoll创建一个Event Poll队列，这个队列分为2部分：等待队列 + 就绪队列。所有等待的Socket都添加到这个队列的等待队列中。如果某个Socket有数据来了，Event Poll就会把该Socket移到“就绪”队列中。
+
+有了Event Poll队列，OS中断操作的对象不再是进程，而是这个Event Poll队列。而且Epoll对于“就绪”队列，采用“双向链表”，来实现快速“删除”、“添加”的操作。可以精准的定位到哪个Socket有数据，而无需再遍历整个Socket列表了。操作复杂度由原来的O(n)降低为O(1)。
+
+PS: 详细介绍参考： https://blog.csdn.net/armlinuxww/article/details/92803381
 
 ## 零拷贝
