@@ -10,7 +10,7 @@
 * Java客户端源码分析
   * 消息生产端源码分析
     * [Kafka生产者发送消息的过程](KafkaProducer_send_msg.md)
-    * Kafka为消息选择Partition的过程
+    * [Kafka为消息选择Partition的过程](Partition_Selection.md)
   * 消息消费端源码分析
   * 通用组件源码分析
 * 服务器端源码分析
