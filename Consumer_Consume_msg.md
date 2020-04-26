@@ -80,160 +80,149 @@ Kafka消费端消息消息源码分析
 
 ## 创建KafkaConsumer对象实例的过程
 
-在实例化一个KafkaConsumer对象时，就进行了非常复杂的操作：
+在实例化一个KafkaConsumer对象时，就进行了非常复杂的操作。
+初始化过程只要完成的操作有：
+
+//TODO: 添加初始化的主要内容
+
+### 订阅Topic
+
+subscribe()方法的主要作用，就是check一下订阅的Topic的可用性，并为订阅消息提供一个可用的存储空间（buffer），并更新订阅topic的列表。
+
+使用subscribe方法时，通常只使用一个参数的方法。
+
+但是底层会默认传递一个NoOpConsumerRebalanceListener示例到下面的方法中：
+
 ```java
-
-    private KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer, Deserializer<V> valueDeserializer) {
+    @Override
+    public void subscribe(Collection<String> topics, ConsumerRebalanceListener listener) {
+        acquireAndEnsureOpen();
         try {
-            GroupRebalanceConfig groupRebalanceConfig = new GroupRebalanceConfig(config,
-                    GroupRebalanceConfig.ProtocolType.CONSUMER);
-
-            this.groupId = groupRebalanceConfig.groupId;
-            this.clientId = buildClientId(config.getString(CommonClientConfigs.CLIENT_ID_CONFIG), groupRebalanceConfig);
-
-            LogContext logContext;
-
-            // If group.instance.id is set, we will append it to the log context.
-            if (groupRebalanceConfig.groupInstanceId.isPresent()) {
-                logContext = new LogContext("[Consumer instanceId=" + groupRebalanceConfig.groupInstanceId.get() +
-                        ", clientId=" + clientId + ", groupId=" + groupId + "] ");
+            //=====================================
+            // 确保group id是存在的。否则抛出异常
+            //=====================================
+            maybeThrowInvalidGroupIdException();
+            //=====================================
+            // 确保传入的topic是存在的
+            //=====================================
+            if (topics == null)
+                throw new IllegalArgumentException("Topic collection to subscribe to cannot be null");
+            if (topics.isEmpty()) {
+                // treat subscribing to empty topic list as the same as unsubscribing
+                this.unsubscribe();
             } else {
-                logContext = new LogContext("[Consumer clientId=" + clientId + ", groupId=" + groupId + "] ");
+                for (String topic : topics) {
+                    if (topic == null || topic.trim().isEmpty())
+                        throw new IllegalArgumentException("Topic collection to subscribe " +
+                                                           "to cannot contain null or empty topic");
+                }
+
+                //========================================
+                // 确保初始化了“自定义分区”的分配，否则抛出异常
+                //========================================
+                throwIfNoAssignorsConfigured();
+
+                //=============================================================
+                // Fetcher是一个线程安全的类，主要管理从broker获取数据的过程。
+                // 在订阅一组新的topic前，需要先清理出一些buffer空间分配给新订阅的topic
+                //=============================================================
+                fetcher.clearBufferedDataForUnassignedTopics(topics);                
+                log.info("Subscribed to topic(s): {}", Utils.join(topics, ", "));
+
+                //=============================================================
+                // 1. subscriptions，是一个SubscriptionState对象的实例。
+                //    这个类，主要职责是为消费组追踪topic、partition和offset信息的
+                // 2. 如果Consumer设置了Rebalance的监听器，此刻就会把Consumer的监听器
+                //    注册到系统里
+                // 3. 同时，更新subscriptions订阅的主题信息
+                //=============================================================
+                if (this.subscriptions.subscribe(new HashSet<>(topics), listener))
+                    metadata.requestUpdateForNewTopics();
             }
-
-            this.log = logContext.logger(getClass());
-            boolean enableAutoCommit = config.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
-            if (groupId == null) { // overwrite in case of default group id where the config is not explicitly provided
-                if (!config.originals().containsKey(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG))
-                    enableAutoCommit = false;
-                else if (enableAutoCommit)
-                    throw new InvalidConfigurationException(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG + " cannot be set to true when default group id (null) is used.");
-            } else if (groupId.isEmpty())
-                log.warn("Support for using the empty group id by consumers is deprecated and will be removed in the next major release.");
-
-            log.debug("Initializing the Kafka consumer");
-            this.requestTimeoutMs = config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG);
-            this.defaultApiTimeoutMs = config.getInt(ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG);
-            this.time = Time.SYSTEM;
-            this.metrics = buildMetrics(config, time, clientId);
-            this.retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
-
-            // load interceptors and make sure they get clientId
-            Map<String, Object> userProvidedConfigs = config.originals();
-            userProvidedConfigs.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
-            List<ConsumerInterceptor<K, V>> interceptorList = (List) (new ConsumerConfig(userProvidedConfigs, false)).getConfiguredInstances(ConsumerConfig.INTERCEPTOR_CLASSES_CONFIG,
-                    ConsumerInterceptor.class);
-            this.interceptors = new ConsumerInterceptors<>(interceptorList);
-            if (keyDeserializer == null) {
-                this.keyDeserializer = config.getConfiguredInstance(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, Deserializer.class);
-                this.keyDeserializer.configure(config.originals(), true);
-            } else {
-                config.ignore(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG);
-                this.keyDeserializer = keyDeserializer;
-            }
-            if (valueDeserializer == null) {
-                this.valueDeserializer = config.getConfiguredInstance(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, Deserializer.class);
-                this.valueDeserializer.configure(config.originals(), false);
-            } else {
-                config.ignore(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG);
-                this.valueDeserializer = valueDeserializer;
-            }
-            OffsetResetStrategy offsetResetStrategy = OffsetResetStrategy.valueOf(config.getString(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG).toUpperCase(Locale.ROOT));
-            this.subscriptions = new SubscriptionState(logContext, offsetResetStrategy);
-            ClusterResourceListeners clusterResourceListeners = configureClusterResourceListeners(keyDeserializer,
-                    valueDeserializer, metrics.reporters(), interceptorList);
-            this.metadata = new ConsumerMetadata(retryBackoffMs,
-                    config.getLong(ConsumerConfig.METADATA_MAX_AGE_CONFIG),
-                    !config.getBoolean(ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_CONFIG),
-                    config.getBoolean(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG),
-                    subscriptions, logContext, clusterResourceListeners);
-            List<InetSocketAddress> addresses = ClientUtils.parseAndValidateAddresses(
-                    config.getList(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG), config.getString(ConsumerConfig.CLIENT_DNS_LOOKUP_CONFIG));
-            this.metadata.bootstrap(addresses);
-            String metricGrpPrefix = "consumer";
-
-            FetcherMetricsRegistry metricsRegistry = new FetcherMetricsRegistry(Collections.singleton(CLIENT_ID_METRIC_TAG), metricGrpPrefix);
-            ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config, time);
-            IsolationLevel isolationLevel = IsolationLevel.valueOf(
-                    config.getString(ConsumerConfig.ISOLATION_LEVEL_CONFIG).toUpperCase(Locale.ROOT));
-            Sensor throttleTimeSensor = Fetcher.throttleTimeSensor(metrics, metricsRegistry);
-            int heartbeatIntervalMs = config.getInt(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG);
-
-            ApiVersions apiVersions = new ApiVersions();
-            NetworkClient netClient = new NetworkClient(
-                    new Selector(config.getLong(ConsumerConfig.CONNECTIONS_MAX_IDLE_MS_CONFIG), metrics, time, metricGrpPrefix, channelBuilder, logContext),
-                    this.metadata,
-                    clientId,
-                    100, // a fixed large enough value will suffice for max in-flight requests
-                    config.getLong(ConsumerConfig.RECONNECT_BACKOFF_MS_CONFIG),
-                    config.getLong(ConsumerConfig.RECONNECT_BACKOFF_MAX_MS_CONFIG),
-                    config.getInt(ConsumerConfig.SEND_BUFFER_CONFIG),
-                    config.getInt(ConsumerConfig.RECEIVE_BUFFER_CONFIG),
-                    config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG),
-                    ClientDnsLookup.forConfig(config.getString(ConsumerConfig.CLIENT_DNS_LOOKUP_CONFIG)),
-                    time,
-                    true,
-                    apiVersions,
-                    throttleTimeSensor,
-                    logContext);
-            this.client = new ConsumerNetworkClient(
-                    logContext,
-                    netClient,
-                    metadata,
-                    time,
-                    retryBackoffMs,
-                    config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG),
-                    heartbeatIntervalMs); //Will avoid blocking an extended period of time to prevent heartbeat thread starvation
-
-            this.assignors = getAssignorInstances(config.getList(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG), config.originals());
-
-            // no coordinator will be constructed for the default (null) group id
-            this.coordinator = groupId == null ? null :
-                new ConsumerCoordinator(groupRebalanceConfig,
-                        logContext,
-                        this.client,
-                        assignors,
-                        this.metadata,
-                        this.subscriptions,
-                        metrics,
-                        metricGrpPrefix,
-                        this.time,
-                        enableAutoCommit,
-                        config.getInt(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG),
-                        this.interceptors);
-            this.fetcher = new Fetcher<>(
-                    logContext,
-                    this.client,
-                    config.getInt(ConsumerConfig.FETCH_MIN_BYTES_CONFIG),
-                    config.getInt(ConsumerConfig.FETCH_MAX_BYTES_CONFIG),
-                    config.getInt(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG),
-                    config.getInt(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG),
-                    config.getInt(ConsumerConfig.MAX_POLL_RECORDS_CONFIG),
-                    config.getBoolean(ConsumerConfig.CHECK_CRCS_CONFIG),
-                    config.getString(ConsumerConfig.CLIENT_RACK_CONFIG),
-                    this.keyDeserializer,
-                    this.valueDeserializer,
-                    this.metadata,
-                    this.subscriptions,
-                    metrics,
-                    metricsRegistry,
-                    this.time,
-                    this.retryBackoffMs,
-                    this.requestTimeoutMs,
-                    isolationLevel,
-                    apiVersions);
-
-            this.kafkaConsumerMetrics = new KafkaConsumerMetrics(metrics, metricGrpPrefix);
-
-            config.logUnused();
-            AppInfoParser.registerAppInfo(JMX_PREFIX, clientId, metrics, time.milliseconds());
-            log.debug("Kafka consumer initialized");
-        } catch (Throwable t) {
-            // call close methods if internal objects are already constructed; this is to prevent resource leak. see KAFKA-2121
-            close(0, true);
-            // now propagate the exception
-            throw new KafkaException("Failed to construct kafka consumer", t);
+        } finally {
+            release();
         }
     }
-    
+```
+
+### 拉取消息
+
+Consumer拉取消息比较简单，通常是这样：
+```java
+    ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+```
+在一个设定的时间范围内拉取数据。通常，poll方法会立即返回数据。但是如果broker没有数据，会等待一段时间，直到超过设定的时间，然后返回一个空的记录集。
+
+poll是一个多态的，继续内部调用的方法多了一个boolean参数（includeMetadataInTimeout），默认是true。
+
+```java
+    @Override
+    public ConsumerRecords<K, V> poll(final Duration timeout) {
+        return poll(time.timer(timeout), true);
+    }
+```
+这个includeMetadataInTimeout默认true，是Consumer拉取数据超时之后阻塞，以便执行自定义的ConsumerRebalanceListener回调。 
+而这个ConsumerRebalanceListener是在subscribe()时设定的：
+
+```java
+    /**
+     * @throws KafkaException if the rebalance callback throws exception
+     */
+    private ConsumerRecords<K, V> poll(final Timer timer, final boolean includeMetadataInTimeout) {
+        //============================================
+        // 1. 看看当前的cousumer是不是已经有一个线程为其服务了，
+        //    保证当前操作是线程安全的
+        // 2. 检查当前的consumer是否已经关闭
+        //============================================
+        acquireAndEnsureOpen();
+        try {
+            this.kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs());
+
+            if (this.subscriptions.hasNoSubscriptionOrUserAssignment()) {
+                throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
+            }
+
+            //==================================================
+            // poll for new data until the timeout expires
+            //==================================================
+            do {
+                //===========================================
+                // 确定网络是否已经在工作状态。
+                // client，是ConsumerNetworkClient的一个实例，
+                // 是Consumer访问网络层的一个高层抽象对象
+                //===========================================
+                client.maybeTriggerWakeup();
+
+                if (includeMetadataInTimeout) {
+                    if (!updateAssignmentMetadataIfNeeded(timer)) {
+                        return ConsumerRecords.empty();
+                    }
+                } else {
+                    while (!updateAssignmentMetadataIfNeeded(time.timer(Long.MAX_VALUE))) {
+                        log.warn("Still waiting for metadata");
+                    }
+                }
+
+                final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = pollForFetches(timer);
+                if (!records.isEmpty()) {
+                    // before returning the fetched records, we can send off the next round of fetches
+                    // and avoid block waiting for their responses to enable pipelining while the user
+                    // is handling the fetched records.
+                    //
+                    // NOTE: since the consumed position has already been updated, we must not allow
+                    // wakeups or any other errors to be triggered prior to returning the fetched records.
+                    if (fetcher.sendFetches() > 0 || client.hasPendingRequests()) {
+                        client.transmitSends();
+                    }
+
+                    return this.interceptors.onConsume(new ConsumerRecords<>(records));
+                }
+            } while (timer.notExpired());
+
+            return ConsumerRecords.empty();
+        } finally {
+            release();
+            this.kafkaConsumerMetrics.recordPollEnd(timer.currentTimeMs());
+        }
+    }
 ```
