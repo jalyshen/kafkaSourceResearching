@@ -11,7 +11,9 @@
   * 消息生产端源码分析
     * [Kafka生产者发送消息的过程](KafkaProducer_send_msg.md)
     * [Kafka为消息选择Partition的过程](Partition_Selection.md)
-  * [消息消费端源码分析](Consumer_Consume_msg.md)
+  * 消息消费端
+    * [消息消费设计思路介绍](Consumer_design.md)
+    * [消息消费端源码分析](Consumer_Consume_msg.md)
   * 通用组件源码分析
 * 服务器端源码分析
   * 日志模块

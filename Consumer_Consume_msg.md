@@ -175,6 +175,7 @@ poll是一个多态的，继续内部调用的方法多了一个boolean参数（
         // 2. 检查当前的consumer是否已经关闭
         //============================================
         acquireAndEnsureOpen();
+        
         try {
             this.kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs());
 
@@ -193,6 +194,14 @@ poll是一个多态的，继续内部调用的方法多了一个boolean参数（
                 //===========================================
                 client.maybeTriggerWakeup();
 
+                //=============================================================================
+                // 这里的 updateAssignmentMetadataIfNeeded() 方法涉及到一个ConsumerCoordinator对象，
+                // 这个coordinate对象在这个方法里也进行poll(timer)操作。
+                // 主要完成的任务是轮询coodinator的事件。 目的是：
+                //    1. 确保当前的cosumer所拥有的coordinate是能被broker;
+                //    2. 确保当前的cousumer已经在某个Group中
+                //    3. 周期性的处理offset的提交
+                //=============================================================================
                 if (includeMetadataInTimeout) {
                     if (!updateAssignmentMetadataIfNeeded(timer)) {
                         return ConsumerRecords.empty();
