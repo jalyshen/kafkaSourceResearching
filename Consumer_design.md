@@ -2,8 +2,8 @@
 ======================================================
 
 - [消费端的重要概念](#消费端的重要概念)
-  - [Consumer Group](#Consumer Group)
-  - [Consume Position](#Consume Position)
+  - [Consumer Group](#Consumer_Group)
+  - [Consume Position](#Consume_Position)
 - [Offset管理](#Offset管理)
   - [设置offset的提交方式](#设置offset的提交方式)
   - [消费端管理Offset](#消费端管理Offset)
@@ -63,6 +63,10 @@ Kafka的Cousumer消费了消息后，并不会马上把offset信息commit到Brok
 
 当前版本（2.4.1），Broker提供了一个特殊的Topic来保存Offset信息。这个特殊的Topic被命名为<b>_consumer_offsets</b>。
 
+一般的，通过一个Consumer Group来消费Broker上的数据，每个Group里会有若干个Consumer。于是，Kafka建立了一个<b>ConsumerCoordinator</b>，来统一协调Group里各个Consumer消费情况。
+
+ConsumerCoordinator是这样定义的： This class manages the coordination process with the consumer coordinator. 这个类的主要职责，就是commit Offset。
+
 ## 消费端管理Offset
 
 消费端管理Offset，可以分为以下部分：
@@ -70,7 +74,11 @@ Kafka的Cousumer消费了消息后，并不会马上把offset信息commit到Brok
   * Group中共享Offset
   * 与Broker同步Offset
 
-Consumer对象（或者具体的实例）中，存储一个SubscriptionState对象。一个Consumer可能会订阅多个Topic的消息，因此，通过一个PartitionStates<TopicPartitionState>来存储不同Topic消费的Offset。<b>TopicPartitionState</b>是真正存储offset的地方，具体通过FetchPosition对象来hold住offset信息。
+Consumer对象（或者具体的实例）中，存储一个SubscriptionState对象。
+
+Subscriptions的定义是：A class for tracking the topics, partitions, and offsets for the consumer.
+
+一个Consumer可能会订阅多个Topic的消息，因此，通过一个PartitionStates<TopicPartitionState>来存储不同Topic消费的Offset。<b>TopicPartitionState</b>是真正存储offset的地方，具体通过FetchPosition对象来hold住offset信息。
 
 这个关系如下：
 
@@ -82,6 +90,7 @@ KafkaConsumer
                                               |-- FetchPosition
 ```
 
+SubscriptionState的初始化会在KafkaConsumer创建时通过Configuration的设置创建实例，然后赋给ConsumerCoordinator实例，各个Consumer实例的SubscriptionState会被Coordintor统一管理。
 
 ## Broker管理Offset
 
