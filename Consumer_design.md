@@ -127,7 +127,7 @@ Rebalance本质上是一种<b>协议</b>，规定了一个Consumer Group下的�
 * 订阅主题数发生变更。 例如：如果你使用了正则表达式的方式进行订阅，那么新建匹配正则表达式的Topic就会触发Rebalance
 * 订阅主题的分区数发生变更
 
-## Rebalance的规则
+## Rebalance的策略
 
 Rebalance需要一个Group下的所有Consumer都协调在一起共同参与分配。Consumer默认提供了两种分配策略：
   * Range
@@ -158,3 +158,17 @@ Rebalance需要一个Group下的所有Consumer都协调在一起共同参与分�
 |&nbsp;&nbsp;&nbsp;&nbsp;topicC-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| </br>
 +-------------+ </br>
 
+## Rebalance的执行和Consumer Group管理
+
+前面已经提到：Kafka建立了一个<b>ConsumerCoordinator</b>，来统一协调Group里各个Consumer消费情况。
+
+ConsumerCoordinator是这样定义的： This class manages the coordination process with the consumer coordinator. 这个类的主要职责，就是commit Offset。
+
+Consumer Group的第一个Consumer启动的时候，它会去和kafka server确定谁是它们组的Coordinator。之后该Group内的所有成员都会和该Coordinator进行协调通信。Coordinator不再需要zookeeper了，性能上可以得到很大的提升。
+
+## Coordinator的确定
+
+* 确定consumer group位移信息写入__consumers_offsets的哪个分区。具体计算公式：<br>
+　__consumers_offsets partition# = Math.abs(groupId.hashCode() % groupMetadataTopicPartitionCount) <br>
+<font color=red>*注意：groupMetadataTopicPartitionCount由offsets.topic.num.partitions指定，默认是50个分区。*</font>
+* 该分区leader所在的broker就是被选定的coordinator
