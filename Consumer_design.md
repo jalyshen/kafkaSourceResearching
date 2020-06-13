@@ -61,12 +61,6 @@ Kafka的Cousumer消费了消息后，并不会马上把offset信息commit到Brok
 
 所以再次强调：<b>Broker上的Committed Offset数据可能会滞后于Consumer上的Current Offset</b>。
 
-当前版本（2.4.1），Broker提供了一个特殊的Topic来保存Offset信息。这个特殊的Topic被命名为<b>_consumer_offsets</b>。
-
-一般的，通过一个Consumer Group来消费Broker上的数据，每个Group里会有若干个Consumer。于是，Kafka建立了一个<b>ConsumerCoordinator</b>，来统一协调Group里各个Consumer消费情况。
-
-ConsumerCoordinator是这样定义的： This class manages the coordination process with the consumer coordinator. 这个类的主要职责，就是commit Offset。
-
 ## 消费端管理Offset
 
 消费端管理Offset，可以分为以下部分：
@@ -92,5 +86,75 @@ KafkaConsumer
 
 SubscriptionState的初始化会在KafkaConsumer创建时通过Configuration的设置创建实例，然后赋给ConsumerCoordinator实例，各个Consumer实例的SubscriptionState会被Coordintor统一管理。
 
+一般的，通过一个Consumer Group来消费Broker上的数据，每个Group里会有若干个Consumer。于是，Kafka建立了一个<b>ConsumerCoordinator</b>，来统一协调Group里各个Consumer消费情况。
+
+ConsumerCoordinator是这样定义的： This class manages the coordination process with the consumer coordinator. 这个类的主要职责，就是commit Offset。
+
+
 ## Broker管理Offset
+
+当前版本（2.4.1），Broker提供了一个特殊的Topic来保存Offset信息。这个特殊的Topic被命名为<b>_consumer_offsets</b>。
+
+__consumer_offsets中的消息保存了每个consumer group某一时刻提交的offset信息。
+
+这个Topic中的Offset的信息大致入下图所示：
+
+--------------------------------------------- </br>
+｜  ｜  ｜ group-name-1|&nbsp; <- <font color=gree>*group id*</font></br>
+｜  ｜  ｜&nbsp;&nbsp;topic_test-1&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp; <- <font color=gree>*topic + partition*</font></br>
+｜  ｜  ｜&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;8  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp; <- <font color=gree>*offset value*</font></br>
+---------------------------------------------</br>
+
+
+# Consumer Rebalance
+
+## 什么是Rebalance
+
+Rebalance本质上是一种<b>协议</b>，规定了一个Consumer Group下的所有Consumer如何达成一致来分配订阅Topic的每个分区。
+
+比如某个group下有20个Consumer，它订阅了一个具有100个分区的Topic。
+
+正常情况下，Kafka平均会为每个Consumer分配5个分区。如果此时又增加了5个Consumer到这个Group里，那么此时每个Consumer就会分配到4个分区，这个重新分配的过程就叫Rebalance。
+
+## Rebalance的触发点
+
+这也是经常被提及的一个问题。rebalance的触发条件有三种：
+
+* 组成员发生变更。
+  * 新Consumer加入组
+  * 有Consumer主动离开组
+  * 已有Consumer崩溃了
+* 订阅主题数发生变更。 例如：如果你使用了正则表达式的方式进行订阅，那么新建匹配正则表达式的Topic就会触发Rebalance
+* 订阅主题的分区数发生变更
+
+## Rebalance的规则
+
+Rebalance需要一个Group下的所有Consumer都协调在一起共同参与分配。Consumer默认提供了两种分配策略：
+  * Range
+  * Round-Robin
+
+如果默认的2种分配策略不能满足需求，用户可以创建自己的分配器以实现不同的分配策略（因为Kafka采用了可插拔式的分配策略）。
+
+举个栗子：
+假设目前某个Consumer Group下有两个Consumer： A和B。 此时又有一个成员加入，kafka会触发rebalance，并根据默认的分配策略重新为A、B和C分配分区。 示例图如下：
+
++-------------+ </br>
+| Consumer A&nbsp; | </br>
++-------------+ </br>
+|&nbsp;&nbsp;&nbsp;&nbsp;topicA-0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| </br>
+|&nbsp;&nbsp;&nbsp;&nbsp;topicB-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-------------+&nbsp;&nbsp;+-------------+&nbsp;&nbsp;+--------------+&nbsp;&nbsp;</br>
+|&nbsp;&nbsp;&nbsp;&nbsp;topicC-0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;Consumer A&nbsp;|&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;Consumer B&nbsp;|&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;Consumer C&nbsp;|
+</br>
++-------------+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-------------+&nbsp;&nbsp;+-------------+&nbsp;&nbsp;+--------------+&nbsp;&nbsp;</br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;TopicA-0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;TopicA-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;TopicB-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;TopicC-0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;TopicB-0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;TopicC-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|
+<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+-------------+&nbsp;&nbsp;+-------------+&nbsp;&nbsp;+--------------+&nbsp;&nbsp;<br>
++-------------+ </br>
+| Consumer B&nbsp; | </br>
++-------------+ </br>
+|&nbsp;&nbsp;&nbsp;&nbsp;topicA-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| </br>
+|&nbsp;&nbsp;&nbsp;&nbsp;topicB-0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| </br>
+|&nbsp;&nbsp;&nbsp;&nbsp;topicC-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| </br>
++-------------+ </br>
 
