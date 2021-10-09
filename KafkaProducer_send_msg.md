@@ -7,38 +7,45 @@ KafKa Producer发送消息的过程
   - [KafkaProducer发送消息的模型](#KafkaProducer发送消息的模型)
 - [Kafka的Producer与Server之间的网络结构](#Kafka的Producer与Server之间的网络结构)
 
-# 使用者角度看Producer发送消息的过程<br/>
-从Kafka提供的API来看，一个消息生产者发送消息还是很简单的。
-这就是大家常用发送消息的代码，简单易用。这里选用“同步”发送的方式：
+## 一. 使用者角度看Producer发送消息的过程
+​        从Kafka提供的API来看，一个消息生产者发送消息还是很简单的。这就是大家常用发送消息的代码，简单易用。
+
+​        这里选用 “**同步**” 发送的方式：
+
 ```java
   //==================================
   // 消息的Topic: Kafka
   // 消息内容是： key： “Kafka_Products”
   //            value: "测试"
   //==================================
-  ProducerRecord<String, String> record = new ProducerRecord<>(“Kafka”, “Kafka_Products”, “测试”);
+  ProducerRecord<String, String> record = 
+           new ProducerRecord<>(“Kafka”, “Kafka_Products”, “测试”);
   try{
       //========================
       // Kafka提供的接口非常简单
       //========================
       Future future = producer.send(record);
-      future.get();//不关心是否发送成功，则不需要这行。
+      //================================================
+      // 这行代码会阻塞发送进程，等待 Kafak Broker 的返回。
+      // 如果不关心是否发送成功，则不需要这行。就不会阻塞发送
+      //================================================
+      future.get();
     } catch(Exception e) {
       // 处理异常
     }
 ```
 
-此时，消息是否开始传递给Kafka Server了呢？那就让我们窥探一下这个send()方法。
+​        此时，消息是否开始传递给Kafka Server了呢？那就让我们窥探一下这个send()方法。
 
-## Producer发送消息过程分析
-现在，就从这个简单的入口入手，一窥究竟。幸好，Kafka的Client用Java重写了，读起来容易些：
+### 1.1 Producer发送消息过程分析
+​        现在，就从这个简单的入口入手，一窥究竟。幸好，Kafka的Client用Java重写了，读起来容易些：
 ```java
   /**
    * 所谓的“同步”调用，也是异步的。
    * 这个方法和下面的方法可以视为一个。
    * Asynchronously send a record to a topic. Equivalent to <code>send(record, null)</code>.
    * See {@link #send(ProducerRecord, Callback)} for details.
-  */
+   */
   @Override
   public Future<RecordMetadata> send(ProducerRecord<K, V> record) {
     return send(record, null);
@@ -53,13 +60,14 @@ KafKa Producer发送消息的过程
   //========================================================================
   @Override
   public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback) {
-    // intercept the record, which can be potentially modified; this method does not throw exceptions
+    // intercept the record, which can be potentially modified; 
+    // this method does not throw exceptions
     ProducerRecord<K, V> interceptedRecord = this.interceptors.onSend(record);
     return doSend(interceptedRecord, callback);
   }
 ```
 
-上硬核的菜：
+​        上硬核的菜：
 ```java
   /**
    * 一个消息，即使调用了该方法，也未必真的发到了kafka server
@@ -75,13 +83,17 @@ KafKa Producer发送消息的过程
           //====================================================
           byte[] serializedKey;
           try {
-              serializedKey = keySerializer.serialize(record.topic(), record.headers(), record.key());
+              serializedKey = keySerializer.serialize(record.topic(), 
+                                                      record.headers(), 
+                                                      record.key());
           } catch (ClassCastException cce) {
             ...
           }
           byte[] serializedValue;
           try {
-              serializedValue = valueSerializer.serialize(record.topic(), record.headers(), record.value());
+              serializedValue = valueSerializer.serialize(record.topic(), 
+                                                          record.headers(), 
+                                                          record.value());
           } catch (ClassCastException cce) {
               ...
           }
@@ -98,15 +110,29 @@ KafKa Producer发送消息的过程
           //====================================================
           // 估算当前消息的大小
           //====================================================
-          int serializedSize = AbstractRecords.estimateSizeInBytesUpperBound(apiVersions.maxUsableProduceMagic(),
-                  compressionType, serializedKey, serializedValue, headers);
+          int serializedSize = AbstractRecords.estimateSizeInBytesUpperBound(
+                  apiVersions.maxUsableProduceMagic(),
+                  compressionType, 
+                  serializedKey, 
+                  serializedValue, 
+                  headers);
           ensureValidRecordSize(serializedSize);
-          long timestamp = record.timestamp() == null ? time.milliseconds() : record.timestamp();
+          long timestamp = record.timestamp() == null ? 
+                                time.milliseconds() : record.timestamp();
           if (log.isTraceEnabled()) {
-              log.trace("Attempting to append record {} with callback {} to topic {} partition {}", record, callback, record.topic(), partition);
+              log.trace(" Attempting to append record {} " +
+                        " with callback {} to topic {} partition {}", 
+                        record, 
+                        callback, 
+                        record.topic(), 
+                        partition);
           }
-          // producer callback will make sure to call both 'callback' and interceptor callback
-          Callback interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);  
+          // producer callback will make sure to call both 'callback' 
+          // and interceptor callback
+          Callback interceptCallback = new InterceptorCallback<>(
+                         callback, 
+                         this.interceptors, 
+                         tp);  
           if (transactionManager != null && transactionManager.isTransactional()) {
               transactionManager.failIfNotReadyForSend();
           }
@@ -116,8 +142,14 @@ KafKa Producer发送消息的过程
           // 并且，如果当前的发送数据包（batch）已经满了，就创建新的数据包
           // 下面，我们好好研究这个RecordAccumulator的append()方法
           //=========================================================================
-          RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey,
-                  serializedValue, headers, interceptCallback, remainingWaitMs, true);
+          RecordAccumulator.RecordAppendResult result = 
+                       accumulator.append(tp, timestamp, 
+                                          serializedKey,
+                                          serializedValue, 
+                                          headers, 
+                                          interceptCallback, 
+                                          remainingWaitMs, 
+                                          true);
           
           //====================================================
           // 如果发现当前要发送数据包已经装不下这条数据了，
@@ -130,29 +162,42 @@ KafKa Producer发送消息的过程
               partition = partition(record, serializedKey, serializedValue, cluster);
               tp = new TopicPartition(record.topic(), partition);
               if (log.isTraceEnabled()) {
-                  log.trace("Retrying append due to new batch creation for topic {} partition {}. The old partition was {}", record.topic(), partition, prevPartition);
+                  log.trace(" Retrying append due to new batch creation for topic {} " +
+                            " partition {}. The old partition was {}", 
+                            record.topic(), 
+                            partition, 
+                            prevPartition);
               }
-              // producer callback will make sure to call both 'callback' and interceptor callback
-              interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);
-              //===============================================================================
+              // producer callback will make sure to
+              // call both 'callback' and interceptor callback
+              interceptCallback = new InterceptorCallback<>(callback, 
+                                                            this.interceptors, 
+                                                            tp);
+              //=============================================================
               // 同上边对此方法的注释。 此处只是最后一个参数改为了“false”，
               // 这个参数的含义是： 
-              // 创建一个新的Batch之前返回，并且在再此尝试添加到发送包之前执行partition的onNewBatch方法。
+              // 创建一个新的Batch之前返回，并且在再此尝试添加到发送包之前
+              // 执行partition的onNewBatch方法。
               // 此处设置为“false”，是因为刚刚创建了一个新的Batch。
-              //===============================================================================
+             //==============================================================
               result = accumulator.append(tp, timestamp, serializedKey,
-                  serializedValue, headers, interceptCallback, remainingWaitMs, false);
+                                          serializedValue, headers, 
+                                          interceptCallback, 
+                                          remainingWaitMs, false);
           }
           
           if (transactionManager != null && transactionManager.isTransactional())
-              transactionManager.maybeAddPartitionToTransaction(tp); 
+                    transactionManager.maybeAddPartitionToTransaction(tp); 
           //===============================================================
           // 如果发现消息包满了（或者已经创建了新的发送包），就通知发送线程去发送消息了
           // 注意：如果创建了新的数据包，而刚刚要发的消息恰恰在这个新创建的包中，那么，
           // 马上要发送的数据是旧的数据，刚刚加入的消息则等待下次发送
           //===============================================================
           if (result.batchIsFull || result.newBatchCreated) {
-              log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
+              log.trace(" Waking up the sender since topic {} partition {} " +
+                        " is either full or getting a new batch", 
+                        record.topic(), 
+                        partition);
               //===========================================
               // 这个warkup，让我们想到什么？
               // 一定是有一个等待的线程来执行真正的发送操作              
@@ -170,9 +215,9 @@ KafKa Producer发送消息的过程
   }
 ```
 
-RecordAccumulator.java， 顾名思义，就是收集消息的地方。 
+​         RecordAccumulator.java， 顾名思义，就是收集消息的地方。 
 
-这个对象，不仅仅是收集当前节点需要发送的消息，还需要汇总其他节点的消息。后续我们会介绍到。
+​         这个对象，不仅仅是收集当前节点需要发送的消息，还需要汇总其他节点的消息。后续我们会介绍到。
 
 ```java
     public RecordAppendResult append(TopicPartition tp,
@@ -183,8 +228,8 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
                                      Callback callback,
                                      long maxTimeToBlock,
                                      boolean abortOnNewBatch) throws InterruptedException {
-        // We keep track of the number of appending thread to make sure we do not miss batches in
-        // abortIncompleteBatches().
+        // We keep track of the number of appending thread to 
+        // make sure we do not miss batches in abortIncompleteBatches()
         appendsInProgress.incrementAndGet();
         ByteBuffer buffer = null;
         if (headers == null) headers = Record.EMPTY_HEADERS;
@@ -193,13 +238,17 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
             Deque<ProducerBatch> dq = getOrCreateDeque(tp);
             synchronized (dq) {
                 if (closed)
-                    throw new KafkaException("Producer closed while send in progress");
-                
+                    throw new KafkaException("Producer closed while send in progress");                
                 //================================================
                 // 如果已经有一个正在等待消息的数据包，那就尝试追加到该包上
                 // 如果追加成功，就返回结果。                
                 //================================================
-                RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq);
+                RecordAppendResult appendResult = tryAppend(timestamp, 
+                                                            key, 
+                                                            value, 
+                                                            headers, 
+                                                            callback, 
+                                                            dq);
                 if (appendResult != null)
                     return appendResult;
             }
@@ -219,13 +268,20 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
             // 如果预估的消息大小<= 预设的batchSize，则使用batchSize
             // 否则需要使用消息实际的大小
             //======================================================================
-            int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
-            log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
-            //=========================================================================================
+            int size = Math.max(this.batchSize,
+                                AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, 
+                                                                              compression, 
+                                                                              key, 
+                                                                              value,
+                                                                              headers));
+            log.trace(" Allocating a new {} byte message buffer for topic {} " +
+                      " partition {}", size, tp.topic(), tp.partition());
+            //=======================================================================
             // 根据消息的实际大小，去申请堆内存。
             // 注意：
             //    如果消息的大小小于batchSize，使用的是batchSize。 
-            //    这里的free对象是一个ByteBuffer的双向链表，里面每个元素预申请的堆空间就是batchSize的大小
+            //    这里的free对象是一个ByteBuffer的双向链表，
+            //         里面每个元素预申请的堆空间就是batchSize的大小
             //    Linux的page cache大小是16k = 4 * 4 * 1024 （默认配置）
             //    此默认设置是有深意的。可以快速的提升内存申请效率，提高服务的效能
             //
@@ -233,34 +289,51 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
             //
             //    如果消息超过了16k，并且当前Producer的主存还有足够的容量，就会开辟出一块内存
             //    否则，就是out of Momery，就只能等待了
-            //=========================================================================================
+            //==============================================================================
             buffer = free.allocate(size, maxTimeToBlock);
             synchronized (dq) {
                 // Need to check if producer is closed again after grabbing the dequeue lock.
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
 
-                RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq);
+                RecordAppendResult appendResult = tryAppend(timestamp, 
+                                                            key, 
+                                                            value, 
+                                                            headers, 
+                                                            callback, 
+                                                            dq);
                 if (appendResult != null) {
-                    // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
+                    // Somebody else found us a batch, 
+                    // return the one we waited for! Hopefully this doesn't happen often...
                     return appendResult;
                 }
                 //===================================
                 // 把消息封装到ProductBatch里
                 //===================================
                 MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
-                ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, time.milliseconds());
-                FutureRecordMetadata future = Objects.requireNonNull(batch.tryAppend(timestamp, key, value, headers,
-                        callback, time.milliseconds()));
+                ProducerBatch batch = new ProducerBatch(tp, 
+                                                        recordsBuilder, 
+                                                        time.milliseconds());
+                FutureRecordMetadata future = Objects.requireNonNull(
+                    batch.tryAppend(timestamp, 
+                                    key, 
+                                    value, 
+                                    headers,
+                                    callback, 
+                                    time.milliseconds()));
                 //===================================
                 // 把记录放到队列的末尾
                 //===================================
                 dq.addLast(batch);
                 incomplete.add(batch);
 
-                // Don't deallocate this buffer in the finally block as it's being used in the record batch
+                // Don't deallocate this buffer in the finally 
+                // block as it's being used in the record batch
                 buffer = null;
-                return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true, false);
+                return new RecordAppendResult(future, 
+                                              dq.size() > 1 || batch.isFull(), 
+                                              true, 
+                                              false);
             }
         } finally {
             if (buffer != null)
@@ -270,26 +343,42 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
     }
 ```
 
-业务逻辑是上面代码表达了。真正把数据添加到发送数据包的，则是这个方法：
+​         业务逻辑是上面代码表达了。真正把数据添加到发送数据包的，则是这个方法：
 ```java
-    private RecordAppendResult tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers,
-                                         Callback callback, Deque<ProducerBatch> deque) {
+    private RecordAppendResult tryAppend(long timestamp, 
+                                         byte[] key, 
+                                         byte[] value, 
+                                         Header[] headers,
+                                         Callback callback, 
+                                         Deque<ProducerBatch> deque) {
         ProducerBatch last = deque.peekLast();
         if (last != null) {
-            FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, time.milliseconds());
+            FutureRecordMetadata future = last.tryAppend(timestamp, 
+                                                         key, 
+                                                         value,
+                                                         headers, 
+                                                         callback, 
+                                                         time.milliseconds());
             if (future == null)
                 last.closeForRecordAppends();
             else
-                return new RecordAppendResult(future, deque.size() > 1 || last.isFull(), false, false);
+                return new RecordAppendResult(future, 
+                                              deque.size() > 1 || last.isFull(), 
+                                              false, false);
         }
         return null;
     }
 ```
 
-很简单，直接看ProducerBatch的tryAppend():
+​         很简单，直接看ProducerBatch的tryAppend():
 
 ```java
-    public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
+    public FutureRecordMetadata tryAppend(long timestamp, 
+                                          byte[] key, 
+                                          byte[] value, 
+                                          Header[] headers, 
+                                          Callback callback, 
+                                          long now) {
         if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
             return null;
         } else {
@@ -297,15 +386,23 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
             // 通过一个Builder类来完成
             //===============================================================
             Long checksum = this.recordsBuilder.append(timestamp, key, value, headers);
-            this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
-                    recordsBuilder.compressionType(), key, value, headers));
+            this.maxRecordSize = Math.max(this.maxRecordSize, 
+                                AbstractRecords.estimateSizeInBytesUpperBound(
+                                    magic(),
+                                    recordsBuilder.compressionType(), 
+                                    key, 
+                                    value, 
+                                    headers));
             this.lastAppendTime = now;
-            FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
-                                                                   timestamp, checksum,
-                                                                   key == null ? -1 : key.length,
-                                                                   value == null ? -1 : value.length,
-                                                                   Time.SYSTEM);
-            // we have to keep every future returned to the users in case the batch needs to be
+            FutureRecordMetadata future = new FutureRecordMetadata(
+                this.produceFuture, 
+                this.recordCount,
+                timestamp, checksum,
+                key == null ? -1 : key.length,
+                value == null ? -1 : value.length,
+                Time.SYSTEM);
+            // we have to keep every future returned to the users 
+            // in case the batch needs to be
             // split to several new batches and resent.
             thunks.add(new Thunk(callback, future));
             this.recordCount++;
@@ -314,13 +411,18 @@ RecordAccumulator.java， 顾名思义，就是收集消息的地方。
     }
 ```
 
-MemoryRecordsBuilder.java的append最后调用的方法：
+​         MemoryRecordsBuilder.java的append最后调用的方法：
 ```java
     /**
-     * Append a record and return its checksum for message format v0 and v1, or null for v2 and above.
+     * Append a record and return its checksum for message 
+     * format v0 and v1, or null for v2 and above.
      */
-    private Long appendWithOffset(long offset, boolean isControlRecord, long timestamp, ByteBuffer key,
-                                  ByteBuffer value, Header[] headers) {
+    private Long appendWithOffset(long offset, 
+                                  boolean isControlRecord, 
+                                  long timestamp, 
+                                  ByteBuffer key,
+                                  ByteBuffer value, 
+                                  Header[] headers) {
         try {
             // 省略一些check代码
             ....
@@ -333,15 +435,19 @@ MemoryRecordsBuilder.java的append最后调用的方法：
                 return appendLegacyRecord(offset, timestamp, key, value, magic);
             }
         } catch (IOException e) {
-            throw new KafkaException("I/O exception when writing to the append stream, closing", e);
+            throw new KafkaException(" I/O exception when writing to " +
+                                     " the append stream, closing", e);
         }
     }
 ```
 
-一般的，这里只研究最新的代码。只看appendDefaultRecord()。 
+​         一般的，这里只研究最新的代码。只看appendDefaultRecord()。 
 ```java
     
-    private void appendDefaultRecord(long offset, long timestamp, ByteBuffer key, ByteBuffer value,
+    private void appendDefaultRecord(long offset, 
+                                     long timestamp, 
+                                     ByteBuffer key, 
+                                     ByteBuffer value,
                                      Header[] headers) throws IOException {
         ensureOpenForRecordAppend();
         int offsetDelta = (int) (offset - baseOffset);
@@ -352,12 +458,17 @@ MemoryRecordsBuilder.java的append最后调用的方法：
         //     private DataOutputStream appendStream
         // 消息最终就会写到这个stream里
         //==============================================================
-        int sizeInBytes = DefaultRecord.writeTo(appendStream, offsetDelta, timestampDelta, key, value, headers);
+        int sizeInBytes = DefaultRecord.writeTo(appendStream, 
+                                                offsetDelta, 
+                                                timestampDelta, 
+                                                key, 
+                                                value, 
+                                                headers);
         recordWritten(offset, timestamp, sizeInBytes);
     }
 ```
 
-最后，深入writeTo()，看看数据是如何写到Stream里的：
+​         最后，深入writeTo()，看看数据是如何写到Stream里的：
 ```java
     //==============================================================
     // out： Used to append records, may compress data on the fly
@@ -368,7 +479,11 @@ MemoryRecordsBuilder.java的append最后调用的方法：
                               ByteBuffer key,
                               ByteBuffer value,
                               Header[] headers) throws IOException {
-        int sizeInBytes = sizeOfBodyInBytes(offsetDelta, timestampDelta, key, value, headers);
+        int sizeInBytes = sizeOfBodyInBytes(offsetDelta, 
+                                            timestampDelta, 
+                                            key, 
+                                            value, 
+                                            headers);
         ByteUtils.writeVarint(sizeInBytes, out);
 
         byte attributes = 0; // there are no used record attributes at the moment
@@ -412,7 +527,8 @@ MemoryRecordsBuilder.java的append最后调用的方法：
         for (Header header : headers) {
             String headerKey = header.key();
             if (headerKey == null)
-                throw new IllegalArgumentException("Invalid null header key found in headers");
+                throw new 
+                    IllegalArgumentException("Invalid null header key found in headers");
 
             byte[] utf8Bytes = Utils.utf8(headerKey);
             ByteUtils.writeVarint(utf8Bytes.length, out);
@@ -431,29 +547,29 @@ MemoryRecordsBuilder.java的append最后调用的方法：
     }
 ```
 
-## Producer发送消息流程总结
-上述的过程，可以总结成如下的图，直观的描述了Producer发送消息的过程：
+### 1.2 Producer发送消息流程总结
+​        上述的过程，可以总结成如下的图，直观的描述了Producer发送消息的过程：
 
 ![](img/KafkaProducer-sendi-meesage-process.png)
 
-细化一下Producer的Cache对象存储Message的结构:
+​        细化一下Producer的Cache对象存储Message的结构:
 
 ![](img/RecordAccumulator_Batch_structure.png)
 
-# 自身角度看Producer发送消息过程
+## 二. 自身角度看Producer发送消息过程
 
-通过上面的分析，已经了解，当Kafka通过KafkaProducer的send()方法把消息交给Kafka后，消息并没有及时的被传输给Server。而是通过一些列的操作，被放到一个数据包中，等待数据包满了以后，再“唤醒”一个叫做Sender的家伙（一个Thread对象）。
+​        通过上面的分析，已经了解，当Kafka通过KafkaProducer的send()方法把消息交给Kafka后，消息并没有及时的被传输给Server。而是通过一些列的操作，被放到一个数据包中，等待数据包满了以后，再“唤醒”一个叫做Sender的家伙（一个Thread对象）。
 
-看到wakeup的时候，我们就基本上有个思路：应该是一个独立的线程来处理发送消息的任务。这样看来，一个KafkaProducer本身，就实现了一个类似“生产者-消费者”的模型。
+​        看到wakeup的时候，我们就基本上有个思路：应该是一个独立的线程来处理发送消息的任务。这样看来，一个KafkaProducer本身，就实现了一个类似“生产者-消费者”的模型。
 
-是不是如此，我们继续往下看。
+​        是不是如此，我们继续往下看。
 
-这个Sender是什么呢？源码中的定义：
+​        这个Sender是什么呢？源码中的定义：
 
  > <P>The <b>background thread</b> that handles the sending of produce requests to the Kafka cluster. <br/>This thread makes metadata requests to renew its view of the cluster and then sends produce requests to the appropriate nodes.
  </p>
 
-显然，这是一个守候线程，等到收集到足够的数据，就发送数据。那么，重要逻辑应该就在这个Sender线程对象的run()方法里：
+​        显然，这是一个守候线程，等到收集到足够的数据，就发送数据。那么，重要逻辑应该就在这个Sender线程对象的run()方法里：
 ```java
     /**
      * The main run loop for the sender thread
@@ -495,7 +611,7 @@ MemoryRecordsBuilder.java的append最后调用的方法：
 
 ```
 
-具体处理方式：
+​        具体处理方式：
 ```java
     private long sendProducerData(long now) {
         //===============================
@@ -529,7 +645,8 @@ MemoryRecordsBuilder.java的append最后调用的方法：
             //=============================
             if (!this.client.ready(node, now)) {
                 iter.remove();
-                notReadyTimeout = Math.min(notReadyTimeout, this.client.pollDelayMs(node, now));
+                notReadyTimeout = Math.min(notReadyTimeout, 
+                                           this.client.pollDelayMs(node, now));
             }
         }
 
@@ -542,7 +659,11 @@ MemoryRecordsBuilder.java的append最后调用的方法：
         // 
         // 注意：这里只针对已经可以接收消息的节点进行处理。
         //==========================================================
-        Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
+        Map<Integer, List<ProducerBatch>> batches = 
+            this.accumulator.drain(cluster, 
+                                   result.readyNodes, 
+                                   this.maxRequestSize, 
+                                   now);
         addToInflightBatches(batches);
         if (guaranteeMessageOrder) {
             // Mute all the partitions drained
@@ -582,24 +703,24 @@ MemoryRecordsBuilder.java的append最后调用的方法：
 
 这里的sendProduceRequests()又有很多次方法调用，这里不在贴代码。直接定位到最后，是JDK的I/O把数据发送出去。
 
-# KafkaProducer发送消息的模型
+### 2.1 KafkaProducer发送消息的模型
 
 到这里，就可以把KafkaProducer发送消息的模型直观的画出来了。
 
 ![](img/message-sending-model.png)
 
-## Sender唤醒过程
+### 2.2 Sender唤醒过程
 
-这个唤醒过程挺有意思。通过代码的追踪，通过调用sender线程的wakeup()，其实是Sender去唤醒NetworkClient（这里不是线程了，是通知客户端开始服务了），这个client会去唤醒Selector。 来看看代码：
+​        这个唤醒过程挺有意思。通过代码的追踪，通过调用sender线程的wakeup()，其实是Sender去唤醒NetworkClient（这里不是线程了，是通知客户端开始服务了），这个client会去唤醒Selector。 来看看代码：
 
-主线程：
+​        主线程：
 ```java
     if (result.batchIsFull || result.newBatchCreated) {        
         this.sender.wakeup();
     }
 ```
 
-然后是Sender.java
+​        然后是 Sender.java
 ```java
     /**
      * Wake up the selector associated with this send thread
@@ -609,7 +730,7 @@ MemoryRecordsBuilder.java的append最后调用的方法：
     }
 ```
 
-接下来是NetworkClient.java
+​        接下来是 NetworkClient.java
 ```java
     /**
      * Interrupt the client if it is blocked waiting on I/O.
@@ -620,7 +741,7 @@ MemoryRecordsBuilder.java的append最后调用的方法：
     }
 ```
 
-然后就是NIO的Selector.java了：
+​        然后就是NIO的Selector.java了：
 ```java
     /**
      * Interrupt the nioSelector if it is blocked waiting to do I/O.
@@ -630,18 +751,23 @@ MemoryRecordsBuilder.java的append最后调用的方法：
         this.nioSelector.wakeup();
     }
 ```
-极有可能有线程在select等待事件被阻塞了，通过wakeup唤醒那个线程开始工作.
+​        整个调用链下来，最后就是调用 NIO 的 wakeup()。 之所以要调用 wakeup()， 是因为某个线程调用 select() 方法后阻塞了，即使没有通道已经就绪，也有办法让其从 select() 方法返回。只要让其它线程在第一个线程调用 select() 方法的那个对象上调用 Selector.wakeup() 方法即可。阻塞在 select() 方法上的线程会立马返回。
 
-# Kafka的Producer与Server之间的网络结构
-已经知道Kafka使用的是NIO，那就看看Kafka的Producer与Server之间的网络是和关系。
+​        如果有其它线程调用了wakeup()方法，但当前没有线程阻塞在 select() 方法上，下个调用select()方法的线程会立“醒来（wake up）”。
+
+> NIO 的信息，可以参考： https://ifeve.com/selectors/
+
+## 三. Kafka的 Producer 与 Server 之间的网络结构
+​        已经知道Kafka使用的是NIO，那就看看Kafka的Producer与Server之间的网络是和关系。
 前面提到，NIO主要涉及到的几个对象：
+
   - Selector
   - Channel
   - Buffer
 
-Kafka创建了一个KafkaClient来管理各个节点（Node）与Channel(Kafka也创建了KafkaChannel对象来增强Cnannel功能)关系。 下图很好的展示它们之间的关系：
+​        Kafka创建了一个KafkaClient来管理各个节点（Node）与Channel(Kafka也创建了KafkaChannel对象来增强Cnannel功能)关系。 下图很好的展示它们之间的关系：
 ![](img/kafka_client_with_channel.png)
 
-另外，Kafka使用了Zero-Copy特性发送数据。此处不在赘述。
+​        另外，Kafka使用了Zero-Copy特性发送数据。此处不在赘述。
 
-接下来，大家可以看看Kafka Server在接到消息后，如何[持久化](KafkaServer_Persist_Message_theory.md)到存储介质上的。
+​        接下来，大家可以看看 Kafka Server 在接到消息后，如何 [持久化](KafkaServer_Persist_Message_theory.md) 到存储介质上的。

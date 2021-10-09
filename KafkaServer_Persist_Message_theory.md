@@ -8,12 +8,10 @@ Kafka持久化消息
 
 ---
 
-Kafka Server存储消息，不仅仅是消息本身，另一个重要的是消息的索引文件。
+​        Kafka Server ( Borker)存储消息，不仅仅是消息本身，另一个重要的是消息的索引文件。接下来会针对这两种数据的持久化分别做说明。
 
-接下来会针对这两种数据的持久化分别做说明。
-
-# 探索Kafak消息的存储关系
-Kafka提供了很多概念，用于存储具体的消息。大家熟知的有：
+## 一. 探索Kafak消息的存储关系
+​        Kafka提供了很多概念，用于存储具体的消息。大家熟知的有：
 
   - Topic
   - Partition
@@ -22,7 +20,7 @@ Kafka提供了很多概念，用于存储具体的消息。大家熟知的有：
   - MessageSet (aka Records, there are several implements)
   - Message (aka Record)
 
-官方也提供了对Topic这个概念的一个高度抽象的示意图: 
+官方也提供了对 Topic 这个概念的一个高度抽象的示意图: 
 
 ![](img/log_anatomy.png)
 
@@ -30,11 +28,11 @@ Kafka提供了很多概念，用于存储具体的消息。大家熟知的有：
 
 ![](img/concepts_with_real_files.png)
 
-具体的File，就与MessageSet（aka Records，具体实现就是FileRecoreds）紧密关联。所有的消息，都会<b>追加</b>到对应的File上。
+​        具体的 File，就与 MessageSet（aka Records，具体实现就是FileRecoreds）紧密关联。所有的消息，都会<b>追加</b>到对应的 File 上。
 
-Kafka Server通过对象“KafkaServer.scala"来启动，启动时，会开启SocketServer，等待各个KafkaProducer来连接。同时，针对不同的请求，初始化各类的KafkaRequestsHandler，来处理不同的请求。我们关注对消息生产者消息的处理：
+​        Kafka Server 通过对象“KafkaServer.scala"来启动，启动时，会开启SocketServer，等待各个KafkaProducer来连接。同时，针对不同的请求，初始化各类的KafkaRequestsHandler，来处理不同的请求。关注对消息生产者消息的处理：
 
-KafkaApis.scala
+​        KafkaApis.scala：
 ```java
    def handleProduceRequest(request: RequestChannel.Request): Unit = {
        val produceRequest = request.body[ProduceRequest]
@@ -51,11 +49,14 @@ KafkaApis.scala
        // 根据不同的TopicPartition，对消息进行归类
        // 存储到刚刚定义的局部容器 authorizedRequestInfo 中
        //===============================================
-       for ((topicPartition, memoryRecords) <- produceRequest.partitionRecordsOrFail.asScala) {
+       for ((topicPartition, memoryRecords) 
+                      <- produceRequest.partitionRecordsOrFail.asScala) {
             if (!authorizedTopics.contains(topicPartition.topic))
-                unauthorizedTopicResponses += topicPartition -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
+                unauthorizedTopicResponses += 
+                   topicPartition -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
             else if (!metadataCache.contains(topicPartition))
-                nonExistingTopicResponses += topicPartition -> new PartitionResponse(Errors.UNKNOWN_TOPIC_OR_PARTITION)
+                nonExistingTopicResponses += 
+                    topicPartition -> new PartitionResponse(Errors.UNKNOWN_TOPIC_OR_PARTITION)
             else
                 try {
                     ProduceRequest.validateRecords(request.header.apiVersion(), memoryRecords)
@@ -65,7 +66,8 @@ KafkaApis.scala
                     authorizedRequestInfo += (topicPartition -> memoryRecords)
                 } catch {
                     case e: ApiException =>
-                        invalidRequestResponses += topicPartition -> new PartitionResponse(Errors.forException(e))
+                        invalidRequestResponses += 
+                             topicPartition -> new PartitionResponse(Errors.forException(e))
                 }
         }
         
@@ -88,14 +90,16 @@ KafkaApis.scala
                 responseCallback = sendResponseCallback,
                 recordConversionStatsCallback = processingStatsCallback)
 
-                // if the request is put into the purgatory, it will have a held reference and hence cannot be garbage collected;
-                // hence we clear its data here in order to let GC reclaim its memory since it is already appended to log
+                // if the request is put into the purgatory, 
+                // it will have a held reference and hence cannot be garbage collected;
+                // hence we clear its data here in order to let GC reclaim its memory 
+                // since it is already appended to log
             produceRequest.clearPartitionRecords()
         }
    }
 ```
 
-现在看看ReplicaManager.scala
+​        现在看看 ReplicaManager.scala ：
 ```java
     def appendRecords(timeout: Long,
                     requiredAcks: Short,
@@ -104,14 +108,16 @@ KafkaApis.scala
                     entriesPerPartition: Map[TopicPartition, MemoryRecords],
                     responseCallback: Map[TopicPartition, PartitionResponse] => Unit,
                     delayedProduceLock: Option[Lock] = None,
-                    recordConversionStatsCallback: Map[TopicPartition, RecordConversionStats] => Unit = _ => ()): Unit = {
+                    recordConversionStatsCallback: Map[TopicPartition, RecordConversionStats] 
+                              => Unit = _ => ()): Unit = {
         if (isValidRequiredAcks(requiredAcks)) {
         val sTime = time.milliseconds
-        //=======================================
+        //==========================
         // 追加消息到当前节点
         //==========================
-        val localProduceResults = appendToLocalLog(internalTopicsAllowed = internalTopicsAllowed,
-            origin, entriesPerPartition, requiredAcks)
+        val localProduceResults = 
+            appendToLocalLog( internalTopicsAllowed = internalTopicsAllowed,
+                    origin, entriesPerPartition, requiredAcks)
         debug("Produce to local log in %d ms".format(time.milliseconds - sTime))
         ...
 
@@ -132,31 +138,36 @@ KafkaApis.scala
     }
 ```
 
-然后，调用Log.scala
+​        然后，调用 Log.scala ：
 ```java
     private def append(records: MemoryRecords,
                      origin: AppendOrigin,
                      interBrokerProtocolVersion: ApiVersion,
                      assignOffsets: Boolean,
                      leaderEpoch: Int): LogAppendInfo = {
-        maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+        maybeHandleIOException(s"Error while appending records " + 
+                               " to $topicPartition in dir ${dir.getParent}") {
 
-        //============================================================================================================================
+        //====================================================================
         // 这里会计算当前的消息大小。 
         //----------------------------------------------
         // 方法里，判断大小（配置文件项： max.message.bytes，默认值1000012）：
         // if (batchSize > config.maxMessageSize) {
-        //     brokerTopicStats.topicStats(topicPartition.topic).bytesRejectedRate.mark(records.sizeInBytes)
+        //     brokerTopicStats.topicStats(topicPartition.topic)
+        //                     .bytesRejectedRate.mark(records.sizeInBytes)
         //     brokerTopicStats.allTopicsStats.bytesRejectedRate.mark(records.sizeInBytes)
-        //     throw new RecordTooLargeException(s"The record batch size in the append to $topicPartition is $batchSize bytes " +
-        //          s"which exceeds the maximum configured value of ${config.maxMessageSize}.")
+        //     throw new RecordTooLargeException(s"The record batch size in the " +
+        //                      " append to $topicPartition is $batchSize bytes " +
+        //          " which exceeds the maximum configured value of " +
+        //          " ${config.maxMessageSize}.")
         // }
-        //============================================================================================================================
+        //=========================================================================
         val appendInfo = analyzeAndValidateRecords(records, origin)
 
-        // return if we have no valid messages or if this is a duplicate of the last appended entry
+        // return if we have no valid messages or if this is 
+        //    a duplicate of the last appended entry
         if (appendInfo.shallowCount == 0)
-        return appendInfo
+                return appendInfo
 
         //============================================================
         // 这里可能会出现消息丢失问题。
@@ -176,7 +187,7 @@ KafkaApis.scala
           records = validRecords)
     }
 ```
-接下里就是<b>LogSegment</b>了。因为Segment对应的就是真实的文件：
+​        接下里就是<b>LogSegment</b>了。因为Segment对应的就是真实的文件：
 ```java
     def append(largestOffset: Long,
              largestTimestamp: Long,
@@ -193,22 +204,22 @@ KafkaApis.scala
     }
 ```
 
-下面，就来分析这些FileRecordds是如何追加到File中的，速度是如此之快！
+​        下面，就来分析这些FileRecordds是如何追加到File中的，速度是如此之快！
 
-# 存储消息
+## 二. 存储消息
 
-Kafka对消息的封装是对象:
+​        Kafka对消息的封装是对象:
 
-org.apache.kafka.common.record.Record (默认实现是: *DefaultRecord*)。
+​                *org.apache.kafka.common.record.Record (默认实现是: DefaultRecord)。*
 
-但是，Kafka Server不会单独记录一条消息到介质上，而是会汇集了一批记录后再持久化到存储介质上。Kafka Server通过如下对(FileRecords)象来持久化消息的：
+​        但是，Kafka Server 不会单独记录一条消息到介质上，而是会汇集了一批记录后再持久化到存储介质上。Kafka Server 通过如下对 ***FileRecords*** 象来持久化消息的：
 
-## org.apache.kafka.common.record.FileRecords
-这个类的官方解释：
+### 2.1 org.apache.kafka.common.record.FileRecords
+​        这个类的官方解释：
 
-A Records implementation backed by a file. An optional start and end position can be applied to this instance to enable slicing a range of the log records.
+​        *A Records implementation backed by a file. An optional start and end position can be applied to this instance to enable slicing a range of the log records.*
 
-现在，只关注此对象的“写”操作。通过阅读官方文档，Kafka持久化消息时，采用的是顺序读写的方式，所有的数据是“追加”到现有文件（Partition）的后面。因此，核心方法也是这里的“append”方法：
+​        现在，只关注此对象的“写”操作。通过阅读官方文档，Kafka持久化消息时，采用的是**顺序读写**的方式，所有的数据是 “**追加**” 到现有文件（Partition）的后面。因此，核心方法也是这里的“append”方法：
 
 ```java
   public class FileRecords extends AbstractRecords implements Closeable {    
@@ -231,31 +242,33 @@ A Records implementation backed by a file. An optional start and end position ca
     //此处省略n行代码    
     ..............
 
-    //============================
+    //=================================
     // 核心代码
     // 这里开始，承接上面介绍的append方法了
-    //============================
+    //=================================
     /**
      * Append a set of records to the file. This method is not thread-safe and must be
      * protected with a lock.
-     * 这个方法，就是把记录（Message）写到文件里
+     * 这个方法，就是把记录（Message）写到文件里。
+     * 注意：这个方法不是线程安全的，需要加锁。
      *
      * @param records The records to append
      * @return the number of bytes written to the underlying file
      */
     public int append(MemoryRecords records) throws IOException {
+        // 先判断要写入的信息，是否超出了一个 segment 的大小
         if (records.sizeInBytes() > Integer.MAX_VALUE - size.get())
             throw new IllegalArgumentException(
                       "Append of size " + records.sizeInBytes() 
                     + " bytes is too large for segment with current file position at " 
                     + size.get());
-        //===================================
+        //============================================
         //最为关键的一行，把数据写到channel (FileChannel)
-        //FileChannel会负责把数据持久化到文件中
-        //===================================
+        //FileChannel 会负责把数据持久化到文件中
+        //============================================
         int written = records.writeFullyTo(channel);
 
-        size.getAndAdd(written);
+        size.getAndAdd(written); // Atomic类型的CAS操作，更新大小
         return written;
     }
 
@@ -272,13 +285,15 @@ A Records implementation backed by a file. An optional start and end position ca
      * 这个方法，用于把数据发送其他节点、消费者。 暂时可以忽略
      */
     @Override
-    public long writeTo(GatheringByteChannel destChannel, long offset, int length) throws IOException {
+    public long writeTo(GatheringByteChannel destChannel, long offset, int length) 
+                throws IOException {
         long newSize = Math.min(channel.size(), end) - start;
         int oldSize = sizeInBytes();
         if (newSize < oldSize)
             throw new KafkaException(String.format(
-                    "Size of FileRecords %s has been truncated during write: old size %d, new size %d",
-                    file.getAbsolutePath(), oldSize, newSize));
+                    "Size of FileRecords %s has been truncated during " +
+                         " write: old size %d, new size %d ",
+                         file.getAbsolutePath(), oldSize, newSize));
 
         long position = start + offset;
         int count = Math.min(length, oldSize);
@@ -297,9 +312,9 @@ A Records implementation backed by a file. An optional start and end position ca
   }
 ```
 
-现在来看看writeFullyTo()是如何做的。 
+​        现在来看看 *writeFullyTo()* 是如何做的。 
 
-这个方法归属于MemoryRecords(*MemoryRecords.java*)对象:
+​        这个方法归属于 MemoryRecords(*MemoryRecords.java*) 对象:
 
 ```java    
     public int writeFullyTo(GatheringByteChannel channel) throws IOException {
@@ -320,19 +335,17 @@ A Records implementation backed by a file. An optional start and end position ca
     }
 ```
 
-这个时候，就要深入的了解一下Channel如何实现write(ByteBuffer src)。
+​        这个时候，就要深入的了解一下Channel如何实现write(ByteBuffer src)。
 
-通常，用户态的程序的某一个操作需要内核态来协助完成(*例如读取磁盘上的一段数据*)，那么用户态的程序就会通过系统调用来调用内核态的接口，请求操作系统来完成某种操作。<b>此时，用户空间的数据，需要COPY一份到内核空间。</b>换句话说，所有的I/O操作，都是在内核态完成。
+​        通常，用户态的程序的某一个操作需要内核态来协助完成(*例如读取磁盘上的一段数据*)，那么用户态的程序就会通过系统调用来调用内核态的接口，请求操作系统来完成某种操作。<b>此时，用户空间的数据，需要COPY一份到内核空间。</b>换句话说，所有的I/O操作，都是在内核态完成。
 
+### 2.2 JDK中的Channel
 
-
-### JDK中的Channel
-
-MemoryRecords使用的channle是接口<b>GatheringByteChannel</b>。官方的说明是：
+​        MemoryRecords使用的channle是接口<b>GatheringByteChannel</b>。官方的说明是：
 
     A channel that can write bytes from a sequence of buffers.
 
-这里研究的是FileChannelImpl这个实现类:
+​        这里研究的是FileChannelImpl这个实现类:
 ```java
     public int write(ByteBuffer src) throws IOException {
         ensureOpen();
@@ -379,7 +392,7 @@ MemoryRecords使用的channle是接口<b>GatheringByteChannel</b>。官方的说
     }
 ```
 
-IOUtil.java 中的 write():
+​        IOUtil.java 中的 write():
 ```java
     static int write(FileDescriptor fd, ByteBuffer src, long position,
                      boolean directIO, int alignment, NativeDispatcher nd)
@@ -428,7 +441,7 @@ IOUtil.java 中的 write():
     }
 ```
 
-IOUtil.java 中的 writeFromNativeBuffer():
+​        IOUtil.java 中的 writeFromNativeBuffer():
 ```java
     private static int writeFromNativeBuffer(FileDescriptor fd, ByteBuffer bb,
                                              long position, boolean directIO,
@@ -465,7 +478,7 @@ IOUtil.java 中的 writeFromNativeBuffer():
     }
 ```
 
-上面代码的nd（NativeDispatcher），使用的实现类便是FileDispatcherImpl.java，其pwrite():
+​        上面代码的nd（NativeDispatcher），使用的实现类便是FileDispatcherImpl.java，其pwrite():
 ``` java
 
     // 就是简单的调用了native方法
@@ -482,9 +495,9 @@ IOUtil.java 中的 writeFromNativeBuffer():
 
 ```
 
-此时，从JDK的Java源码已经到头了，是到了看看FileDispatcherImpl的Native实现的时候了。 这里找来了OpenJDK的源码。通过OpenJDK源码来看看最终是如何调用OS来完成“落盘”的。
+​        此时，从JDK的Java源码已经到头了，是到了看看FileDispatcherImpl的Native实现的时候了。 这里找来了OpenJDK的源码。通过OpenJDK源码来看看最终是如何调用OS来完成“落盘”的。
 
-源码链接：[FileDispatcherImpl.c](https://github.com/openjdk/jdk/blob/1691abc7478bb83bd213b325007f14da4d038651/src/java.base/unix/native/libnio/ch/FileDispatcherImpl.c)
+​        源码链接：[FileDispatcherImpl.c](https://github.com/openjdk/jdk/blob/1691abc7478bb83bd213b325007f14da4d038651/src/java.base/unix/native/libnio/ch/FileDispatcherImpl.c)
 
 ``` c
     #define pwrite64 pwrite  # 感兴趣的，可以阅读Linux的源码 pwrite() 方法
@@ -500,21 +513,18 @@ IOUtil.java 中的 writeFromNativeBuffer():
     }
 
 ```
-到这里，我们针对Kafka Server如何持久化消息的全部过程就了解了。
+​        到这里，针对Kafka Server如何持久化消息的全部过程就了解了。
 
-那么，对于消费者，Kafak Server有义务为它们提供快速检索消息的服务。那么，如何能快速地定位一条消息呢？Kafka Server为每个消息建立了相应的索引，并针对索引文件的存储提供了特殊的方法。接下来看看Kafka是如何做的呢？
+​        那么，对于消费者，Kafak Server有义务为它们提供快速检索消息的服务。那么，如何能快速地定位一条消息呢？Kafka Server为每个消息建立了相应的索引，并针对索引文件的存储提供了特殊的方法。接下来看看Kafka是如何做的呢？
 
-## 存储消息索引
-索引，就是为了快速查找到相应的消息记录，因此，索引文件需要常驻内存，并能及时的更新索引的数据，因为随时都有新的消息追加到服务器中。同时，这个索引文件需要随时存储到介质上，以防丢失。例如，服务器宕机后，Kafka Server能够重新装载索引文件，继续服务。
+## 三. 存储消息索引
+​        索引，就是为了快速查找到相应的消息记录，因此，索引文件需要常驻内存，并能及时的更新索引的数据，因为随时都有新的消息追加到服务器中。同时，这个索引文件需要随时存储到介质上，以防丢失。例如，服务器宕机后，Kafka Server能够重新装载索引文件，继续服务。
 
-如何保证索引文件能够及时的被更新，并及时的持久化到存储介质上呢？Kafka又一次利用了JDK7后提供的新特性：
+​        如何保证索引文件能够及时的被更新，并及时的持久化到存储介质上呢？Kafka又一次利用了JDK7后提供的新特性：**mmap**
 
-<b>mmap</b>
+​        关于mmap的介绍，请参考[NIO](nio_knowledge.md)介绍。现在来看看Kafka的索引是如何创建和映射的：
 
-关于mmap的介绍，请参考[NIO](nio_knowledge.md)介绍。
-
-来看看Kafka的索引是如何创建和映射的：
-### 消息的索引文件创建
+### 3.1 消息的索引文件创建
 
 ```scala
   @volatile
