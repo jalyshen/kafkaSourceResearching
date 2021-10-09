@@ -761,9 +761,9 @@ KafKa Producer发送消息的过程
 ​        已经知道Kafka使用的是NIO，那就看看Kafka的Producer与Server之间的网络是和关系。
 前面提到，NIO主要涉及到的几个对象：
 
-  - Selector
-  - Channel
-  - Buffer
+  - **Selector**
+  - **Channel**
+  - **Buffer**
 
 ​        Kafka创建了一个KafkaClient来管理各个节点（Node）与Channel(Kafka也创建了KafkaChannel对象来增强Cnannel功能)关系。 下图很好的展示它们之间的关系：
 ![](img/kafka_client_with_channel.png)
