@@ -1,7 +1,7 @@
 Kafka消费端消息消息源码分析
 ======================================================
 
-# 使用Kafka Consumer消费消息的方式
+## 一. 使用Kafka Consumer消费消息的方式
 
 下面一段代码，展示了Kafka Consumer API的极简使用方式：使用了“Automatic Offset Committing”的方式获取消息。
 
@@ -17,8 +17,10 @@ Kafka消费端消息消息源码分析
   props.setProperty("group.id", "test");
   props.setProperty("enable.auto.commit", "true");
   props.setProperty("auto.commit.interval.ms", "1000");
-  props.setProperty("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
-  props.setProperty("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+  props.setProperty("key.deserializer", 
+                    "org.apache.kafka.common.serialization.StringDeserializer");
+  props.setProperty("value.deserializer", 
+                    "org.apache.kafka.common.serialization.StringDeserializer");
   KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
   //==============================
   // 订阅名为“foo”和“bar”的Topic
@@ -27,10 +29,14 @@ Kafka消费端消息消息源码分析
   while (true) {
       //==============================
       //  从服务器开始拉取数据，开始消费
+      //  每隔 100ms 拉取一次数据
       //==============================
       ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
       for (ConsumerRecord<String, String> record : records)
-        System.out.printf("offset = %d, key = %s, value = %s%n", record.offset(), record.key(), record.value());
+        System.out.printf("offset = %d, key = %s, value = %s%n", 
+                          record.offset(), 
+                          record.key(), 
+                          record.value());
   }
 ```
 
@@ -45,14 +51,16 @@ Kafka消费端消息消息源码分析
     props.setProperty("bootstrap.servers", "localhost:9092");
     props.setProperty("group.id", "test");
     props.setProperty("enable.auto.commit", "false");
-    props.setProperty("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
-    props.setProperty("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+    props.setProperty("key.deserializer", 
+                      "org.apache.kafka.common.serialization.StringDeserializer");
+    props.setProperty("value.deserializer", 
+                      "org.apache.kafka.common.serialization.StringDeserializer");
     KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
     //==============================
     // 订阅名为“foo”和“bar”的Topic
     //==============================
     consumer.subscribe(Arrays.asList("foo", "bar"));
-    // 设置处理消息缓冲的大小
+    // 设置处理消息缓冲的最小容量
     final int minBatchSize = 200;
     List<ConsumerRecord<String, String>> buffer = new ArrayList<>();
     while (true) {
@@ -63,7 +71,12 @@ Kafka消费端消息消息源码分析
         for (ConsumerRecord<String, String> record : records) {
             buffer.add(record);
         }
-        // 手动清楚cache，同步获取消息的offset
+        //=======================================
+        // 如果取回的数据量超过了最小设定的缓存大小
+        // 就把取回的数据存入 DB，
+        // 然后手动提交 committed Offset 到 broker
+        // 最后，手动清除 cache
+        //========================================
         if (buffer.size() >= minBatchSize) {
             insertIntoDb(buffer);
             consumer.commitSync();
@@ -72,26 +85,22 @@ Kafka消费端消息消息源码分析
     }
 ```
 
-具体的API使用还有很多方式，读者可以自行阅读相关文档。
+​        从API角度看，Kafka已经屏蔽了很多细节，让用户使用起来非常简单。现在需要探究期间的复杂性。
 
-从API角度看，Kafka已经屏蔽了很多细节，让用户使用起来非常简单。现在需要探究期间的复杂性。
+## 二. Kafka拉取消息的过程
 
-# Kafka拉取消息的过程
+### 2.1 创建KafkaConsumer对象实例的过程
 
-## 创建KafkaConsumer对象实例的过程
+​        在实例化一个KafkaConsumer对象时，就进行了非常复杂的操作。
+​        初始化过程只要完成的操作有：
 
-在实例化一个KafkaConsumer对象时，就进行了非常复杂的操作。
-初始化过程只要完成的操作有：
+​        //TODO: 添加初始化的主要内容
 
-//TODO: 添加初始化的主要内容
+### 2.2 订阅Topic
 
-### 订阅Topic
+​        subscribe()方法的主要作用，就是 check 一下订阅的Topic的可用性，并为订阅消息提供一个可用的存储空间（buffer），并更新订阅topic的列表。
 
-subscribe()方法的主要作用，就是check一下订阅的Topic的可用性，并为订阅消息提供一个可用的存储空间（buffer），并更新订阅topic的列表。
-
-使用subscribe方法时，通常只使用一个参数的方法。
-
-但是底层会默认传递一个NoOpConsumerRebalanceListener示例到下面的方法中：
+​        使用subscribe方法时，通常只使用一个参数的方法。但是底层会默认传递一个 NoOpConsumerRebalanceListener  实例到下面的方法中：
 
 ```java
     @Override
@@ -106,15 +115,17 @@ subscribe()方法的主要作用，就是check一下订阅的Topic的可用性�
             // 确保传入的topic是存在的
             //=====================================
             if (topics == null)
-                throw new IllegalArgumentException("Topic collection to subscribe to cannot be null");
+                throw new IllegalArgumentException(" Topic collection to subscribe " +
+                                                   " to cannot be null");
             if (topics.isEmpty()) {
                 // treat subscribing to empty topic list as the same as unsubscribing
                 this.unsubscribe();
             } else {
                 for (String topic : topics) {
                     if (topic == null || topic.trim().isEmpty())
-                        throw new IllegalArgumentException("Topic collection to subscribe " +
-                                                           "to cannot contain null or empty topic");
+                        throw new IllegalArgumentException(" Topic collection to subscribe " +
+                                                           " to cannot contain null " +
+                                                           " or empty topic");
                 }
 
                 //========================================
@@ -145,15 +156,15 @@ subscribe()方法的主要作用，就是check一下订阅的Topic的可用性�
     }
 ```
 
-### 拉取消息
+### 2.3 拉取消息
 
-Consumer拉取消息比较简单，通常是这样：
+​        Consumer拉取消息比较简单，通常是这样：
 ```java
     ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
 ```
-在一个设定的时间范围内拉取数据。通常，poll方法会立即返回数据。但是如果broker没有数据，会等待一段时间，直到超过设定的时间，然后返回一个空的记录集。
+​        在一个设定的时间范围内拉取数据。通常，poll方法会立即返回数据。但是如果broker没有数据，会等待一段时间，直到超过设定的时间，然后返回一个空的记录集。
 
-poll是一个多态的，继续内部调用的方法多了一个boolean参数（includeMetadataInTimeout），默认是true。
+​        poll是一个多态的，继续内部调用的方法多了一个boolean参数（*includeMetadataInTimeout*），默认是true。
 
 ```java
     @Override
@@ -161,14 +172,15 @@ poll是一个多态的，继续内部调用的方法多了一个boolean参数（
         return poll(time.timer(timeout), true);
     }
 ```
-这个includeMetadataInTimeout默认true，是Consumer拉取数据超时之后阻塞，以便执行自定义的ConsumerRebalanceListener回调。 
-而这个ConsumerRebalanceListener是在subscribe()时设定的：
+​        这个includeMetadataInTimeout默认true，是Consumer拉取数据超时之后阻塞，以便执行自定义的ConsumerRebalanceListener回调。 
+​        而这个ConsumerRebalanceListener是在subscribe()时设定的：
 
 ```java
     /**
      * @throws KafkaException if the rebalance callback throws exception
      */
-    private ConsumerRecords<K, V> poll(final Timer timer, final boolean includeMetadataInTimeout) {
+    private ConsumerRecords<K, V> poll(final Timer timer, 
+                                       final boolean includeMetadataInTimeout) {
         //============================================
         // 1. 看看当前的cousumer是不是已经有一个线程为其服务了，
         //    保证当前操作是线程安全的
@@ -180,7 +192,8 @@ poll是一个多态的，继续内部调用的方法多了一个boolean参数（
             this.kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs());
 
             if (this.subscriptions.hasNoSubscriptionOrUserAssignment()) {
-                throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
+                throw new IllegalStateException(" Consumer is not subscribed " +
+                                                " to any topics or assigned any partitions");
             }
 
             //==================================================
@@ -194,14 +207,15 @@ poll是一个多态的，继续内部调用的方法多了一个boolean参数（
                 //===========================================
                 client.maybeTriggerWakeup();
 
-                //=============================================================================
-                // 这里的 updateAssignmentMetadataIfNeeded() 方法涉及到一个ConsumerCoordinator对象，
+                //===========================================================================
+                // 这里的 updateAssignmentMetadataIfNeeded() 
+                //       方法涉及到一个ConsumerCoordinator对象，
                 // 这个coordinate对象在这个方法里也进行poll(timer)操作。
                 // 主要完成的任务是轮询coodinator的事件。 目的是：
                 //    1. 确保当前的cosumer所拥有的coordinate是能被broker;
                 //    2. 确保当前的cousumer已经在某个Group中
                 //    3. 周期性的处理offset的提交
-                //=============================================================================
+                //===========================================================================
                 if (includeMetadataInTimeout) {
                     if (!updateAssignmentMetadataIfNeeded(timer)) {
                         return ConsumerRecords.empty();
@@ -212,22 +226,23 @@ poll是一个多态的，继续内部调用的方法多了一个boolean参数（
                     }
                 }
 
-                final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = pollForFetches(timer);
+                final Map<TopicPartition, List<ConsumerRecord<K, V>>> 
+                            records = pollForFetches(timer);
                 if (!records.isEmpty()) {
-                    // before returning the fetched records, we can send off the next round of fetches
-                    // and avoid block waiting for their responses to enable pipelining while the user
+                    // before returning the fetched records, we can send off 
+                    // the next round of fetches and avoid block waiting for
+                    // their responses to enable pipelining while the user
                     // is handling the fetched records.
                     //
-                    // NOTE: since the consumed position has already been updated, we must not allow
-                    // wakeups or any other errors to be triggered prior to returning the fetched records.
+                    // NOTE: since the consumed position has already been updated, 
+                    // we must not allow wakeups or any other errors
+                    // to be triggered prior to returning the fetched records.
                     if (fetcher.sendFetches() > 0 || client.hasPendingRequests()) {
                         client.transmitSends();
                     }
-
                     return this.interceptors.onConsume(new ConsumerRecords<>(records));
                 }
             } while (timer.notExpired());
-
             return ConsumerRecords.empty();
         } finally {
             release();
