@@ -136,12 +136,12 @@ KafKa Producer发送消息的过程
           if (transactionManager != null && transactionManager.isTransactional()) {
               transactionManager.failIfNotReadyForSend();
           }
-          //=========================================================================
+          //=================================================================
           // 最核心的步骤了。
           // 此方法的含义是：把序列化后的消息发送到指定的Topic + Partition 组合中去，
           // 并且，如果当前的发送数据包（batch）已经满了，就创建新的数据包
-          // 下面，我们好好研究这个RecordAccumulator的append()方法
-          //=========================================================================
+          // 本文的后面会详细研究这个RecordAccumulator的 append() 方法
+          //=================================================================
           RecordAccumulator.RecordAppendResult result = 
                        accumulator.append(tp, timestamp, 
                                           serializedKey,
@@ -173,13 +173,13 @@ KafKa Producer发送消息的过程
               interceptCallback = new InterceptorCallback<>(callback, 
                                                             this.interceptors, 
                                                             tp);
-              //=============================================================
+              //=====================================================
               // 同上边对此方法的注释。 此处只是最后一个参数改为了“false”，
               // 这个参数的含义是： 
-              // 创建一个新的Batch之前返回，并且在再此尝试添加到发送包之前
+              // 创建一个新的Batch之前返回，并且再次尝试添加到发送包之前
               // 执行partition的onNewBatch方法。
               // 此处设置为“false”，是因为刚刚创建了一个新的Batch。
-             //==============================================================
+              //======================================================
               result = accumulator.append(tp, timestamp, serializedKey,
                                           serializedValue, headers, 
                                           interceptCallback, 
@@ -199,7 +199,8 @@ KafKa Producer发送消息的过程
                         record.topic(), 
                         partition);
               //===========================================
-              // 这个warkup，让我们想到什么？
+              // 这里采用的是 NIO 的 Selector，数据准备好了，就
+              // 让唤醒 Selector 线程
               // 一定是有一个等待的线程来执行真正的发送操作              
               //===========================================
               this.sender.wakeup();
@@ -217,7 +218,7 @@ KafKa Producer发送消息的过程
 
 ​         RecordAccumulator.java， 顾名思义，就是收集消息的地方。 
 
-​         这个对象，不仅仅是收集当前节点需要发送的消息，还需要汇总其他节点的消息。后续我们会介绍到。
+​         这个对象，不仅仅是收集当前节点需要发送的消息，还需要汇总其他节点的消息。后续会介绍到。
 
 ```java
     public RecordAppendResult append(TopicPartition tp,
@@ -253,7 +254,7 @@ KafKa Producer发送消息的过程
                     return appendResult;
             }
 
-            // 这个是调用发法前设置的逻辑。 
+            // 这个是调用 append() 方法前设置的逻辑。 
             if (abortOnNewBatch) {
                 // Return a result that will cause another call to append.
                 return new RecordAppendResult(null, false, false, true);
@@ -263,11 +264,12 @@ KafKa Producer发送消息的过程
             // 如果当前没有正在等待接收消息的数据包，那就试图创建一个新的
             //====================================================
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
-            //======================================================================
-            // 估算当前消息的大小，并与用户自己配置的batchSize(默认值是1024 * 4 * 4)比较，
-            // 如果预估的消息大小<= 预设的batchSize，则使用batchSize
-            // 否则需要使用消息实际的大小
-            //======================================================================
+            //=========================================================================
+            // 估算当前消息的大小，并与用户自己配置的batchSize(默认值是1024 * 4 * 4 = 16KB)比较，
+            // 如果预估的消息大小 <= 预设的batchSize，则使用batchSize,
+            // 否则需要使用消息实际的大小。
+            // 这样做，是为了保证一个 batch 的大小正好是 4 个 block（块）组成，也叫做“内存对齐“。
+            //=========================================================================
             int size = Math.max(this.batchSize,
                                 AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, 
                                                                               compression, 
@@ -276,13 +278,14 @@ KafKa Producer发送消息的过程
                                                                               headers));
             log.trace(" Allocating a new {} byte message buffer for topic {} " +
                       " partition {}", size, tp.topic(), tp.partition());
-            //=======================================================================
-            // 根据消息的实际大小，去申请堆内存。
+            //=============================================================================
+            // 根据消息的实际大小，去申请实际的物理内存。
+            // 因为用的是 NIO，所以 free.allocate() 方法申请的是物理内存，而不是堆内存（堆属于JVM）
             // 注意：
             //    如果消息的大小小于batchSize，使用的是batchSize。 
             //    这里的free对象是一个ByteBuffer的双向链表，
-            //         里面每个元素预申请的堆空间就是batchSize的大小
-            //    Linux的page cache大小是16k = 4 * 4 * 1024 （默认配置）
+            //         里面每个元素预申请的堆空间就是batchSize的大小。
+            //    Linux的 page cache大小是 16k = 4 * 4 * 1024 （默认配置）
             //    此默认设置是有深意的。可以快速的提升内存申请效率，提高服务的效能
             //
             //    如果消息小于默认配置，buffer的剩余内容会被“0”填充
@@ -370,7 +373,7 @@ KafKa Producer发送消息的过程
     }
 ```
 
-​         很简单，直接看ProducerBatch的tryAppend():
+​         很简单，直接看ProducerBatch的 tryAppend()：
 
 ```java
     public FutureRecordMetadata tryAppend(long timestamp, 
@@ -382,9 +385,9 @@ KafKa Producer发送消息的过程
         if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
             return null;
         } else {
-            //===============================================================
+            //============================
             // 通过一个Builder类来完成
-            //===============================================================
+            //============================
             Long checksum = this.recordsBuilder.append(timestamp, key, value, headers);
             this.maxRecordSize = Math.max(this.maxRecordSize, 
                                 AbstractRecords.estimateSizeInBytesUpperBound(
@@ -411,7 +414,7 @@ KafKa Producer发送消息的过程
     }
 ```
 
-​         MemoryRecordsBuilder.java的append最后调用的方法：
+​         MemoryRecordsBuilder.java的 append() 最后调用的方法：
 ```java
     /**
      * Append a record and return its checksum for message 
@@ -558,13 +561,13 @@ KafKa Producer发送消息的过程
 
 ## 二. 自身角度看Producer发送消息过程
 
-​        通过上面的分析，已经了解，当Kafka通过KafkaProducer的send()方法把消息交给Kafka后，消息并没有及时的被传输给Server。而是通过一些列的操作，被放到一个数据包中，等待数据包满了以后，再“唤醒”一个叫做Sender的家伙（一个Thread对象）。
+​        通过上面的分析，已经了解，当Kafka通过KafkaProducer的send()方法把消息交给 ***Kafka Client*** 后，消息并没有及时的被传输给 ***Kafka Server***。而是通过一些列的操作，被放到一个数据包中，等待数据包满了以后，再“唤醒”一个叫做Sender的家伙（一个Thread对象）。
 
-​        看到wakeup的时候，我们就基本上有个思路：应该是一个独立的线程来处理发送消息的任务。这样看来，一个KafkaProducer本身，就实现了一个类似“生产者-消费者”的模型。
+​        看到wakeup的时候，就基本上有个思路：这应该是一个独立的线程来处理发送消息的任务。这样看来，一个 KafkaProducer 本身，就实现了一个类似“生产者-消费者”的模型。
 
-​        是不是如此，我们继续往下看。
+​        是不是如此，继续往下看。
 
-​        这个Sender是什么呢？源码中的定义：
+​        这个 Sender 是什么呢？源码中的定义：
 
  > <P>The <b>background thread</b> that handles the sending of produce requests to the Kafka cluster. <br/>This thread makes metadata requests to renew its view of the cluster and then sends produce requests to the appropriate nodes.
  </p>
@@ -586,11 +589,11 @@ KafKa Producer发送消息的过程
             }
         }
 
-        //=====================================================================
+        //========================================================================
         // 省略很多代码，主要是处理这个的问题：
-        // 如果线程被停止，可能RecordAccumulator中还有数据没有发送出去，要让线程优雅地停止
+        // 如果线程被停止，可能 RecordAccumulator 中还有数据没有发送出去，要让线程优雅地停止
         // 自行看代码吧
-        //=====================================================================
+        //========================================================================
         ...        
     }
 
@@ -601,7 +604,7 @@ KafKa Producer发送消息的过程
     void runOnce() {
         ...
         //===========================================
-        // 发送消息.
+        // 发送消息。
         // 返回值有意思，是一个long，一个表示时间的毫秒数
         // 这个数，表示等待Response的最大时间
         //===========================================
@@ -615,18 +618,18 @@ KafKa Producer发送消息的过程
 ```java
     private long sendProducerData(long now) {
         //===============================
-        // 获取Broker的集群环境
-        // 例如获取Leader
+        // 获取 Broker 的集群环境
+        // 例如获取 Leader
         //===============================
         Cluster cluster = metadata.fetch();        
         
-        //==============================================================
+        //===================================================================
         // 把要发送的消息，根据Topic-Partition进行分类，然后再设置每个Topic在集群中的
         // leader节点信息，作为发送的目的地
         //
         // 如果此时某个Topic对应的集群没有了Leader节点，即将发送的数据会被收集到
         // 一个叫做unknownLeaderTopics的集合里，这些消息也不会从batch中删除
-        //==============================================================
+        //====================================================================
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // 省略一些check代码
@@ -659,12 +662,17 @@ KafKa Producer发送消息的过程
         // 
         // 注意：这里只针对已经可以接收消息的节点进行处理。
         //==========================================================
+        // batches 这个 map 的 key，是 Node 的 id
+        //==========================================================
         Map<Integer, List<ProducerBatch>> batches = 
             this.accumulator.drain(cluster, 
                                    result.readyNodes, 
                                    this.maxRequestSize, 
                                    now);
         addToInflightBatches(batches);
+        //==============================================
+        // 如果要保证消息的顺序，就需要“擦除 partition 的信息
+        //==============================================
         if (guaranteeMessageOrder) {
             // Mute all the partitions drained
             for (List<ProducerBatch> batchList : batches.values()) {
