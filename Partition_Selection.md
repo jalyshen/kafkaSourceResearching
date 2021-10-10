@@ -2,8 +2,8 @@
 =======================
 
 Kafka消息会被发送到哪个partition，有2种方式：
-  * 消息自己确定需要发送到哪个Partition
-  * Producer会计算出Partition ID，分配给当前的消息
+  * 消息自己确定需要发送到哪个Partition (*人为指定*)
+  * Producer会计算出Partition ID，分配给当前的消息 （*系统会根据配置信息自动分配*）
 
 一般而言，第二种方式是默认的方式，对于新消息总是通过Producer来分配Partition ID。
 如果当前消息已经存在了Partition ID，就不再重复计算。
@@ -14,8 +14,9 @@ Kafka消息会被发送到哪个partition，有2种方式：
                           byte[] serializedKey, 
                           byte[] serializedValue, 
                           Cluster cluster) 
-    {
+    {        
         Integer partition = record.partition();
+        // 如果消息已经设置了Partition，就直接使用；否则 Kafka 开始根据相关信息分配
         return partition != null ? partition :
                                        partitioner.partition(
                                        record.topic(), record.key(), 
@@ -47,9 +48,9 @@ Partitioner.java对partition方法的定义如下：
 ```
 
 Kafka提供了3种partition策略(实现)：
-  * DefaultPartitioner: 默认的Partition计算方式
-  * RoundRobinPartitioner: 轮询方式计算方法
-  * UniformStickyPartitioner: 均匀分布的计算方式
+  * **DefaultPartitioner**: 默认的Partition计算方式
+  * **RoundRobinPartitioner**: 轮询方式计算方法
+  * **UniformStickyPartitioner**: 均匀分布的计算方式
 
 ## DefaultPartitioner
 
@@ -71,11 +72,12 @@ Kafka提供了3种partition策略(实现)：
         List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
         int numPartitions = partitions.size();
         // hash the keyBytes to choose a partition
-        //=======================================================
+        //================================================================
         // 根据消息的Key(Byte)计算murmur2的哈希值（理解为第二代murmur）。
         // murmur hash，是一种非加密型的一致性哈希
         // 这种Hash计算方法性能高，碰撞率低。
-        //=======================================================
+        // 然后计算出的 hash 值按照 分区的数量进行取模计算，结果就是对应的分区号
+        //================================================================
         return Utils.toPositive(Utils.murmur2(keyBytes)) % numPartitions;
   }
 ```
@@ -90,7 +92,7 @@ Kafka提供了3种partition策略(实现)：
                        Cluster cluster) 
   {
         //==========================================
-        // 获取当前Topic一共有多少个Partitons
+        // 获取当前Topic的Partitons数量
         //==========================================
         List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
         int numPartitions = partitions.size();
@@ -98,16 +100,16 @@ Kafka提供了3种partition策略(实现)：
         // 这个值，表示当前追加的消息在指定的Topic是第几条
         int nextValue = nextValue(topic);
 
-        //===================================
+        //======================================
         // 获取当前Topic可用的Partitons数量。
-        // 这个数量应该<=上一步计算的partitions
-        //===================================
+        // 这个数量应该<=上一步计算的numPartitions
+        //======================================
         List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
 
-        //==========================================
+        //===================================================
         // 如果有可用的partitons,就根据有效的partition数量求值
         // 否则，就根据Topic原有总数量求值
-        //==========================================
+        //===================================================
         if (!availablePartitions.isEmpty()) {
             int part = Utils.toPositive(nextValue) % availablePartitions.size();
             return availablePartitions.get(part).partition();
@@ -122,6 +124,10 @@ Kafka提供了3种partition策略(实现)：
    * 用于Topic统计每个Topic已经追加的消息数量
    */
   private int nextValue(String topic) {
+        //========================================
+        // 如果当前的topic有数据了，就返回；
+        // 否则，给指定的topic新建一个计数器，初始值为0
+        //========================================
         AtomicInteger counter = topicCounterMap.computeIfAbsent(topic, k -> {
             return new AtomicInteger(0);
         });
@@ -144,7 +150,7 @@ Kafka提供了3种partition策略(实现)：
     return stickyPartitionCache.partition(topic, cluster);
   }
 
-  //----------------------------------------------------------------------------------
+  //---------------------------------------------------------------------------
 
   StickyPartitionCache.java:
 
@@ -166,13 +172,14 @@ Kafka提供了3种partition策略(实现)：
   
   public int nextPartition(String topic, Cluster cluster, int prevPartition) {
     //==========================================
-    // 获取当前Topic一共有多少个Partitons
+    // 获取当前Topic的Partitons总数量
     //==========================================
     List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
     Integer oldPart = indexCache.get(topic);
     Integer newPart = oldPart;
     
-    // Check that the current sticky partition for the topic is either not set or that the partition that 
+    // Check that the current sticky partition for the topic 
+    // is either not set or that the partition that 
     // triggered the new batch matches the sticky partition that needs to be changed.
     if (oldPart == null || oldPart == prevPartition) {
       List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
@@ -187,7 +194,8 @@ Kafka提供了3种partition策略(实现)：
           newPart = availablePartitions.get(random % availablePartitions.size()).partition();
         }
       }
-      // Only change the sticky partition if it is null or prevPartition matches the current sticky partition.
+      // Only change the sticky partition if it is null 
+      // or prevPartition matches the current sticky partition.
       if (oldPart == null) {
         indexCache.putIfAbsent(topic, newPart);
       } else {
