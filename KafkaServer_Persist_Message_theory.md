@@ -171,7 +171,7 @@ KafkaApis.scala：
 
         //============================================================
         // 这里可能会出现消息丢失问题。
-        // 如果消息的总长度超过了max.message.bytes的大小，就会被阶段！！！！
+        // 如果消息的总长度超过了max.message.bytes的大小，就会被截断！！！！
         //============================================================
         // trim any invalid bytes or partial messages before appending it to the on-disk log
         var validRecords = trimInvalidBytes(records, appendInfo)
